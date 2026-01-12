@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WebCli Terminal</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+    <link rel="stylesheet" href="lib/xterm.css">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -75,8 +75,8 @@
 </div>
 <div id="terminal-container"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+<script src="lib/xterm.min.js"></script>
+<script src="lib/xterm-addon-fit.min.js"></script>
 <script>
     const MessageType = {
         PTY_OUTPUT: 'PTY_OUTPUT',
@@ -94,8 +94,8 @@
         constructor() {
             this.ws = null;
             this.terminals = new Map();
+            this.fitAddons = new Map();
             this.currentPtyId = null;
-            this.fitAddon = new FitAddon.FitAddon();
 
             this.init();
         }
@@ -109,16 +109,23 @@
 
         connect() {
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            this.ws = new WebSocket(`${protocol}//${location.host}/ws`);
+            const wsUrl = `${protocol}//${location.host}/ws`;
+            console.log('Connecting to WebSocket:', wsUrl);
+            this.ws = new WebSocket(wsUrl);
 
             this.ws.onopen = () => {
+                console.log('WebSocket connected');
                 this.updateStatus(true);
                 this.createPty();
             };
 
-            this.ws.onmessage = (e) => this.handleMessage(JSON.parse(e.data));
+            this.ws.onmessage = (e) => {
+                console.log('WebSocket message received:', e.data);
+                this.handleMessage(JSON.parse(e.data));
+            };
 
-            this.ws.onclose = () => {
+            this.ws.onclose = (e) => {
+                console.log('WebSocket closed:', e.code, e.reason);
                 this.updateStatus(false);
                 setTimeout(() => this.connect(), 3000);
             };
@@ -130,7 +137,12 @@
             switch (msg.type) {
                 case MessageType.PTY_OUTPUT:
                     const term = this.terminals.get(msg.ptyId);
-                    if (term) term.write(msg.data);
+                    if (term && msg.data) {
+                        const decoded = atob(msg.data);
+                        const bytes = Uint8Array.from(decoded, c => c.charCodeAt(0));
+                        const text = new TextDecoder('utf-8').decode(bytes);
+                        term.write(text);
+                    }
                     break;
                 case MessageType.SUCCESS:
                     if (msg.ptyId && !this.terminals.has(msg.ptyId)) {
@@ -151,18 +163,22 @@
             const term = new Terminal({
                 cursorBlink: true,
                 fontSize: 14,
-                fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+                fontFamily: '"Maple Mono NF", "MesloLGS NF", "Hack Nerd Font", Menlo, Monaco, "Courier New", monospace',
                 theme: {
                     background: '#1e1e1e',
                     foreground: '#d4d4d4'
                 }
             });
 
-            term.loadAddon(this.fitAddon);
+            const fitAddon = new FitAddon.FitAddon();
+            term.loadAddon(fitAddon);
             this.terminals.set(ptyId, term);
+            this.fitAddons.set(ptyId, fitAddon);
 
             term.onData(data => {
-                this.send({ type: MessageType.PTY_INPUT, ptyId, data });
+                // 将输入数据进行 Base64 编码，避免 JSON 转义问题
+                const encoded = btoa(unescape(encodeURIComponent(data)));
+                this.send({ type: MessageType.PTY_INPUT, ptyId, data: encoded });
             });
 
             term.onResize(({ cols, rows }) => {
@@ -199,9 +215,10 @@
             container.innerHTML = '';
 
             const term = this.terminals.get(ptyId);
-            if (term) {
+            const fitAddon = this.fitAddons.get(ptyId);
+            if (term && fitAddon) {
                 term.open(container);
-                this.fitAddon.fit();
+                fitAddon.fit();
                 term.focus();
                 this.currentPtyId = ptyId;
 
@@ -218,6 +235,7 @@
             this.send({ type: MessageType.PTY_CLOSE, ptyId });
             this.terminals.get(ptyId)?.dispose();
             this.terminals.delete(ptyId);
+            this.fitAddons.delete(ptyId);
 
             document.querySelector(`.tab[data-pty-id="${ptyId}"]`)?.remove();
 
@@ -229,9 +247,10 @@
 
         fitTerminal() {
             if (this.currentPtyId) {
-                this.fitAddon.fit();
+                const fitAddon = this.fitAddons.get(this.currentPtyId);
                 const term = this.terminals.get(this.currentPtyId);
-                if (term) {
+                if (fitAddon && term) {
+                    fitAddon.fit();
                     this.send({
                         type: MessageType.PTY_RESIZE,
                         ptyId: this.currentPtyId,
@@ -244,7 +263,11 @@
 
         send(msg) {
             if (this.ws?.readyState === WebSocket.OPEN) {
-                this.ws.send(JSON.stringify(msg));
+                const json = JSON.stringify(msg);
+                console.log('WebSocket sending:', json);
+                this.ws.send(json);
+            } else {
+                console.warn('WebSocket not open, cannot send:', msg);
             }
         }
 

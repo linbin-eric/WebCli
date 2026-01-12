@@ -6,10 +6,9 @@ import com.pty4j.WinSize;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.OutputStreamWriter;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
@@ -21,8 +20,8 @@ import java.util.function.Consumer;
 public class PtyInstance {
     private final String id;
     private final PtyProcess process;
-    private final BufferedReader reader;
-    private final OutputStreamWriter writer;
+    private final InputStream inputStream;
+    private final OutputStream outputStream;
     private volatile boolean running = true;
     private Consumer<String> outputConsumer;
     private Thread readThread;
@@ -31,14 +30,23 @@ public class PtyInstance {
         this.id = UUID.randomUUID().toString();
         Map<String, String> env = new HashMap<>(System.getenv());
         env.put("TERM", "xterm-256color");
+        env.put("LANG", "en_US.UTF-8");
+        env.put("LC_ALL", "en_US.UTF-8");
+        // 禁用 zsh 自动建议等功能
+        env.put("DISABLE_AUTO_UPDATE", "true");
+        env.put("ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE", "");
+        env.remove("ZSH_AUTOSUGGEST_STRATEGY");
 
         this.process = new PtyProcessBuilder()
                 .setCommand(command)
                 .setEnvironment(env)
+                .setConsole(false)
+                .setInitialColumns(120)
+                .setInitialRows(40)
                 .start();
 
-        this.reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
-        this.writer = new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8);
+        this.inputStream = process.getInputStream();
+        this.outputStream = process.getOutputStream();
     }
 
     public void setOutputConsumer(Consumer<String> consumer) {
@@ -48,10 +56,11 @@ public class PtyInstance {
     public void startReading() {
         readThread = Thread.startVirtualThread(() -> {
             try {
-                char[] buffer = new char[1024];
+                byte[] buffer = new byte[1024];
                 int len;
-                while (running && (len = reader.read(buffer)) != -1) {
-                    String output = new String(buffer, 0, len);
+                while (running && (len = inputStream.read(buffer)) != -1) {
+                    String output = new String(buffer, 0, len, StandardCharsets.UTF_8);
+                    log.debug("PTY 输出: {}", output.length() > 100 ? output.substring(0, 100) + "..." : output);
                     Consumer<String> consumer = outputConsumer;
                     if (consumer != null) {
                         consumer.accept(output);
@@ -66,8 +75,8 @@ public class PtyInstance {
     }
 
     public void write(String input) throws IOException {
-        writer.write(input);
-        writer.flush();
+        outputStream.write(input.getBytes(StandardCharsets.UTF_8));
+        outputStream.flush();
     }
 
     public void resize(int cols, int rows) {
@@ -77,8 +86,8 @@ public class PtyInstance {
     public void close() {
         running = false;
         try {
-            writer.close();
-            reader.close();
+            outputStream.close();
+            inputStream.close();
         } catch (IOException e) {
             log.error("关闭 PTY 流失败", e);
         }

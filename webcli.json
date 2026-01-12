@@ -1,0 +1,4 @@
+{
+  "shell": "/bin/zsh",
+  "shellArgs": ["-i", "-l"]
+}

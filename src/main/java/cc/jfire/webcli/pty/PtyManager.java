@@ -1,5 +1,6 @@
 package cc.jfire.webcli.pty;
 
+import cc.jfire.webcli.config.WebCliConfig;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
@@ -11,13 +12,15 @@ public class PtyManager {
     private final ConcurrentHashMap<String, PtyInstance> instances = new ConcurrentHashMap<>();
     private final String[] defaultCommand;
 
-    public PtyManager() {
-        String os = System.getProperty("os.name").toLowerCase();
-        if (os.contains("win")) {
-            this.defaultCommand = new String[]{"cmd.exe"};
+    public PtyManager(WebCliConfig config) {
+        String[] shellCommand = config.getShellCommand();
+        if (shellCommand != null) {
+            this.defaultCommand = shellCommand;
         } else {
-            this.defaultCommand = new String[]{"/bin/bash", "-l"};
+            WebCliConfig defaultConfig = WebCliConfig.defaultConfig();
+            this.defaultCommand = defaultConfig.getShellCommand();
         }
+        log.info("默认 Shell 命令: {}", String.join(" ", defaultCommand));
     }
 
     public PtyInstance create() throws IOException {
