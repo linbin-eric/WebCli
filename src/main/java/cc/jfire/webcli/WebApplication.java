@@ -6,6 +6,7 @@ import cc.jfire.dson.Dson;
 import cc.jfire.jfire.core.ApplicationContext;
 import cc.jfire.jfire.core.prepare.annotation.EnableAutoConfiguration;
 import cc.jfire.jfire.core.prepare.annotation.configuration.Configuration;
+import cc.jfire.jnet.common.util.ChannelConfig;
 import cc.jfire.jnet.server.AioServer;
 import cc.jfire.webcli.config.WebCliConfig;
 import cc.jfire.webcli.pty.PtyManager;
@@ -39,8 +40,17 @@ public class WebApplication
     {
         WebSocketHandler   wsHandler = new WebSocketHandler(ptyManager);
         ApplicationContext context   = ApplicationContext.boot(WebApplication.class);
-        server = HttpAppServer.start(port, context, "web", null, wsHandler);
-        log.info("WebCli 服务已启动，端口: {}", port);
+        ChannelConfig channelConfig = new ChannelConfig()
+                .setIp("127.0.0.1")
+                .setPort(port)
+                .setChannelGroup(ChannelConfig.DEFAULT_CHANNEL_GROUP);
+        HttpAppServer.StartParam startParam = new HttpAppServer.StartParam()
+                .setChannelConfig(channelConfig)
+                .setContext(context)
+                .setWebDir("web")
+                .setWebSocketProcessor(wsHandler);
+        server = HttpAppServer.start(startParam);
+        log.info("WebCli 服务已启动，监听地址: {}:{}", channelConfig.getIp(), port);
         log.info("请访问: http://127.0.0.1:{}/", port);
     }
 
@@ -58,7 +68,7 @@ public class WebApplication
     {
         RuntimeJVM.registerMainClass(WebApplication.class.getName());
         int          port   = DEFAULT_PORT;
-        WebCliConfig config = loadConfig();
+        WebCliConfig config = WebCliConfig.defaultConfig();
         if (args.length > 0)
         {
             try
@@ -75,27 +85,5 @@ public class WebApplication
         app.start();
     }
 
-    private static WebCliConfig loadConfig()
-    {
-        Path configPath = Path.of(CONFIG_FILE);
-        if (Files.exists(configPath))
-        {
-            try
-            {
-                String content = Files.readString(configPath);
-                WebCliConfig config = Dson.fromString(WebCliConfig.class, content);
-                log.info("已加载配置文件: {}", CONFIG_FILE);
-                return config;
-            }
-            catch (IOException e)
-            {
-                log.warn("读取配置文件失败，使用默认配置", e);
-            }
-        }
-        else
-        {
-            log.info("配置文件不存在，使用默认配置");
-        }
-        return WebCliConfig.defaultConfig();
-    }
+
 }

@@ -8,6 +8,8 @@ public enum MessageType {
     PTY_CLOSE,
     PTY_LIST,
     PTY_SWITCH,
+    PTY_ATTACH,
+    PTY_RENAME,
     ERROR,
     SUCCESS
 }

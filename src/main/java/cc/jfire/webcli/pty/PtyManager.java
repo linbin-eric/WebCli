@@ -11,26 +11,34 @@ import java.util.concurrent.ConcurrentHashMap;
 public class PtyManager {
     private final ConcurrentHashMap<String, PtyInstance> instances = new ConcurrentHashMap<>();
     private final String[] defaultCommand;
+    private final String workingDirectory;
 
     public PtyManager(WebCliConfig config) {
+        WebCliConfig defaultConfig = WebCliConfig.defaultConfig();
         String[] shellCommand = config.getShellCommand();
         if (shellCommand != null) {
             this.defaultCommand = shellCommand;
         } else {
-            WebCliConfig defaultConfig = WebCliConfig.defaultConfig();
             this.defaultCommand = defaultConfig.getShellCommand();
         }
+        String workDir = config.getWorkingDirectory();
+        if (workDir != null && !workDir.isBlank()) {
+            this.workingDirectory = workDir;
+        } else {
+            this.workingDirectory = defaultConfig.getWorkingDirectory();
+        }
         log.info("默认 Shell 命令: {}", String.join(" ", defaultCommand));
+        log.info("默认工作目录: {}", workingDirectory);
     }
 
-    public PtyInstance create() throws IOException {
-        return create(defaultCommand);
+    public PtyInstance create(String name) throws IOException {
+        return create(defaultCommand, name);
     }
 
-    public PtyInstance create(String[] command) throws IOException {
-        PtyInstance instance = new PtyInstance(command);
+    public PtyInstance create(String[] command, String name) throws IOException {
+        PtyInstance instance = new PtyInstance(command, name, workingDirectory);
         instances.put(instance.getId(), instance);
-        log.info("创建 PTY 实例: {}", instance.getId());
+        log.info("创建 PTY 实例: {}, 名称: {}", instance.getId(), name);
         return instance;
     }
 

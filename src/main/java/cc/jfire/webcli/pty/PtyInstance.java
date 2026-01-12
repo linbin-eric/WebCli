@@ -18,16 +18,20 @@ import java.util.function.Consumer;
 @Slf4j
 @Getter
 public class PtyInstance {
+    private static final int MAX_HISTORY_SIZE = 100 * 1024; // 100KB 历史缓冲区
     private final String id;
+    private volatile String name;
     private final PtyProcess process;
     private final InputStream inputStream;
     private final OutputStream outputStream;
+    private final StringBuilder outputHistory = new StringBuilder();
     private volatile boolean running = true;
-    private Consumer<String> outputConsumer;
+    private volatile Consumer<String> outputConsumer;
     private Thread readThread;
 
-    public PtyInstance(String[] command) throws IOException {
+    public PtyInstance(String[] command, String name, String workingDirectory) throws IOException {
         this.id = UUID.randomUUID().toString();
+        this.name = name;
         Map<String, String> env = new HashMap<>(System.getenv());
         env.put("TERM", "xterm-256color");
         env.put("LANG", "en_US.UTF-8");
@@ -40,6 +44,7 @@ public class PtyInstance {
         this.process = new PtyProcessBuilder()
                 .setCommand(command)
                 .setEnvironment(env)
+                .setDirectory(workingDirectory)
                 .setConsole(false)
                 .setInitialColumns(120)
                 .setInitialRows(40)
@@ -61,6 +66,14 @@ public class PtyInstance {
                 while (running && (len = inputStream.read(buffer)) != -1) {
                     String output = new String(buffer, 0, len, StandardCharsets.UTF_8);
                     log.debug("PTY 输出: {}", output.length() > 100 ? output.substring(0, 100) + "..." : output);
+                    // 保存到历史缓冲区
+                    synchronized (outputHistory) {
+                        outputHistory.append(output);
+                        // 如果超过最大大小，截断前面的内容
+                        if (outputHistory.length() > MAX_HISTORY_SIZE) {
+                            outputHistory.delete(0, outputHistory.length() - MAX_HISTORY_SIZE);
+                        }
+                    }
                     Consumer<String> consumer = outputConsumer;
                     if (consumer != null) {
                         consumer.accept(output);
@@ -72,6 +85,12 @@ public class PtyInstance {
                 }
             }
         });
+    }
+
+    public String getOutputHistory() {
+        synchronized (outputHistory) {
+            return outputHistory.toString();
+        }
     }
 
     public void write(String input) throws IOException {
@@ -96,5 +115,9 @@ public class PtyInstance {
 
     public boolean isAlive() {
         return process.isAlive();
+    }
+
+    public void setName(String name) {
+        this.name = name;
     }
 }

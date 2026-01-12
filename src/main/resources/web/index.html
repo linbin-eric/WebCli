@@ -65,6 +65,24 @@
         }
         .status.connected { color: #4ec9b0; }
         .status.disconnected { color: #f14c4c; }
+        .context-menu {
+            position: fixed;
+            background: #2d2d2d;
+            border: 1px solid #404040;
+            border-radius: 4px;
+            padding: 4px 0;
+            min-width: 120px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            z-index: 1000;
+            display: none;
+        }
+        .context-menu.show { display: block; }
+        .context-menu-item {
+            padding: 6px 16px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .context-menu-item:hover { background: #094771; }
     </style>
 </head>
 <body>
@@ -74,6 +92,10 @@
     <span class="status disconnected" id="status">未连接</span>
 </div>
 <div id="terminal-container"></div>
+<div class="context-menu" id="context-menu">
+    <div class="context-menu-item" id="menu-rename">重命名</div>
+    <div class="context-menu-item" id="menu-close">关闭终端</div>
+</div>
 
 <script src="lib/xterm.min.js"></script>
 <script src="lib/xterm-addon-fit.min.js"></script>
@@ -86,6 +108,8 @@
         PTY_CLOSE: 'PTY_CLOSE',
         PTY_LIST: 'PTY_LIST',
         PTY_SWITCH: 'PTY_SWITCH',
+        PTY_ATTACH: 'PTY_ATTACH',
+        PTY_RENAME: 'PTY_RENAME',
         ERROR: 'ERROR',
         SUCCESS: 'SUCCESS'
     };
@@ -95,16 +119,103 @@
             this.ws = null;
             this.terminals = new Map();
             this.fitAddons = new Map();
+            this.terminalNames = new Map();
             this.currentPtyId = null;
+            this.nextTerminalNumber = 1;
+            this.contextMenuPtyId = null;
 
             this.init();
         }
 
         init() {
             this.connect();
+            this.initContextMenu();
 
             document.getElementById('btn-new').addEventListener('click', () => this.createPty());
             window.addEventListener('resize', () => this.fitTerminal());
+        }
+
+        initContextMenu() {
+            const menu = document.getElementById('context-menu');
+
+            // 点击其他地方关闭菜单
+            document.addEventListener('click', (e) => {
+                if (!menu.contains(e.target)) {
+                    this.hideContextMenu();
+                }
+            });
+
+            // 重命名
+            document.getElementById('menu-rename').addEventListener('click', (e) => {
+                e.stopPropagation();
+                const ptyId = this.contextMenuPtyId;
+                this.hideContextMenu();
+                if (ptyId) {
+                    this.showRenameDialog(ptyId);
+                }
+            });
+
+            // 关闭终端
+            document.getElementById('menu-close').addEventListener('click', (e) => {
+                e.stopPropagation();
+                const ptyId = this.contextMenuPtyId;
+                this.hideContextMenu();
+                if (ptyId) {
+                    this.closePty(ptyId);
+                }
+            });
+        }
+
+        showContextMenu(e, ptyId) {
+            e.preventDefault();
+            this.contextMenuPtyId = ptyId;
+            const menu = document.getElementById('context-menu');
+            menu.style.left = e.clientX + 'px';
+            menu.style.top = e.clientY + 'px';
+            menu.classList.add('show');
+        }
+
+        hideContextMenu() {
+            document.getElementById('context-menu').classList.remove('show');
+            this.contextMenuPtyId = null;
+        }
+
+        showRenameDialog(ptyId) {
+            const currentName = this.terminalNames.get(ptyId) || '';
+            const newName = prompt('请输入新的终端名称:', currentName);
+            if (newName === null) {
+                return; // 用户取消
+            }
+            const trimmedName = newName.trim();
+            if (trimmedName === '') {
+                alert('终端名称不能为空');
+                return;
+            }
+            if (trimmedName === currentName) {
+                return; // 名称未变化
+            }
+            // 检查名称是否重复
+            for (const [id, name] of this.terminalNames) {
+                if (id !== ptyId && name === trimmedName) {
+                    alert('终端名称已存在，请使用其他名称');
+                    return;
+                }
+            }
+            this.renamePty(ptyId, trimmedName);
+        }
+
+        renamePty(ptyId, newName) {
+            this.send({ type: MessageType.PTY_RENAME, ptyId, name: newName });
+            // 立即更新本地
+            this.terminalNames.set(ptyId, newName);
+            this.updateTabName(ptyId, newName);
+        }
+
+        updateTabName(ptyId, name) {
+            const tab = document.querySelector(`.tab[data-pty-id="${ptyId}"]`);
+            if (tab) {
+                tab.innerHTML = `<span class="tab-name">${name}</span><span class="close">×</span>`;
+            }
         }
 
         connect() {
@@ -116,7 +227,8 @@
             this.ws.onopen = () => {
                 console.log('WebSocket connected');
                 this.updateStatus(true);
-                this.createPty();
+                // 连接后先获取已有终端列表
+                this.send({ type: MessageType.PTY_LIST });
             };
 
             this.ws.onmessage = (e) => {
@@ -144,9 +256,15 @@
                         term.write(text);
                     }
                     break;
+                case MessageType.PTY_LIST:
+                    // 处理终端列表响应
+                    this.handlePtyList(msg.data);
+                    break;
                 case MessageType.SUCCESS:
                     if (msg.ptyId && !this.terminals.has(msg.ptyId)) {
-                        this.addTerminal(msg.ptyId);
+                        // 新创建的终端，使用服务端返回的名称
+                        this.addTerminal(msg.ptyId, msg.name);
+                        this.updateNextTerminalNumber();
                     }
                     break;
                 case MessageType.ERROR:
@@ -155,11 +273,50 @@
             }
         }
 
-        createPty() {
-            this.send({ type: MessageType.PTY_CREATE });
+        handlePtyList(data) {
+            const list = JSON.parse(data);
+            if (list && list.length > 0) {
+                // 有已存在的终端，逐个恢复
+                // 先按名称排序，确保顺序一致
+                list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+                list.forEach((ptyInfo, index) => {
+                    if (ptyInfo.alive) {
+                        this.attachPty(ptyInfo.id, ptyInfo.name, index === 0);
+                    }
+                });
+                // 更新下一个终端编号
+                this.updateNextTerminalNumber();
+            } else {
+                // 没有已存在的终端，创建新终端
+                this.createPty();
+            }
         }
 
-        addTerminal(ptyId) {
+        updateNextTerminalNumber() {
+            // 从现有终端名称中找出最大编号
+            let maxNumber = 0;
+            this.terminalNames.forEach(name => {
+                const match = name.match(/^终端 (\d+)$/);
+                if (match) {
+                    maxNumber = Math.max(maxNumber, parseInt(match[1]));
+                }
+            });
+            this.nextTerminalNumber = maxNumber + 1;
+        }
+
+        attachPty(ptyId, name, switchTo) {
+            // 先创建本地终端
+            this.addTerminal(ptyId, name, switchTo);
+            // 发送 attach 请求，获取历史输出
+            this.send({ type: MessageType.PTY_ATTACH, ptyId });
+        }
+
+        createPty() {
+            const name = `终端 ${this.nextTerminalNumber++}`;
+            this.send({ type: MessageType.PTY_CREATE, name });
+        }
+
+        addTerminal(ptyId, name, switchTo = true) {
             const term = new Terminal({
                 cursorBlink: true,
                 fontSize: 14,
@@ -174,6 +331,7 @@
             term.loadAddon(fitAddon);
             this.terminals.set(ptyId, term);
             this.fitAddons.set(ptyId, fitAddon);
+            this.terminalNames.set(ptyId, name);
 
             term.onData(data => {
                 // 将输入数据进行 Base64 编码，避免 JSON 转义问题
@@ -185,16 +343,18 @@
                 this.send({ type: MessageType.PTY_RESIZE, ptyId, cols, rows });
             });
 
-            this.addTab(ptyId);
-            this.switchTerminal(ptyId);
+            this.addTab(ptyId, name);
+            if (switchTo) {
+                this.switchTerminal(ptyId);
+            }
         }
 
-        addTab(ptyId) {
+        addTab(ptyId, name) {
             const tabs = document.getElementById('tabs');
             const tab = document.createElement('button');
             tab.className = 'tab';
             tab.dataset.ptyId = ptyId;
-            tab.innerHTML = `终端 ${this.terminals.size}<span class="close">×</span>`;
+            tab.innerHTML = `<span class="tab-name">${name}</span><span class="close">×</span>`;
 
             tab.addEventListener('click', (e) => {
                 if (e.target.classList.contains('close')) {
@@ -202,6 +362,11 @@
                 } else {
                     this.switchTerminal(ptyId);
                 }
+            });
+
+            // 右键菜单
+            tab.addEventListener('contextmenu', (e) => {
+                this.showContextMenu(e, ptyId);
             });
 
             tabs.appendChild(tab);
@@ -236,6 +401,7 @@
             this.terminals.get(ptyId)?.dispose();
             this.terminals.delete(ptyId);
             this.fitAddons.delete(ptyId);
+            this.terminalNames.delete(ptyId);
 
             document.querySelector(`.tab[data-pty-id="${ptyId}"]`)?.remove();
 

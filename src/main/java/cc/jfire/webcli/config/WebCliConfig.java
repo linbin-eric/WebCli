@@ -7,6 +7,7 @@ public class WebCliConfig
 {
     private String   shell;
     private String[] shellArgs;
+    private String   workingDirectory;
 
     public String[] getShellCommand()
     {
@@ -27,6 +28,7 @@ public class WebCliConfig
     public static WebCliConfig defaultConfig()
     {
         WebCliConfig config = new WebCliConfig();
+        config.setWorkingDirectory(System.getProperty("user.home"));
         String       os     = System.getProperty("os.name").toLowerCase();
         if (os.contains("win"))
         {
