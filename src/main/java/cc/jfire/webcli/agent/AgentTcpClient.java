@@ -1,0 +1,361 @@
+package cc.jfire.webcli.agent;
+
+import cc.jfire.dson.Dson;
+import cc.jfire.jnet.client.ClientChannel;
+import cc.jfire.se2.JfireSE;
+import cc.jfire.jnet.common.api.Pipeline;
+import cc.jfire.jnet.common.api.ReadProcessor;
+import cc.jfire.jnet.common.api.ReadProcessorNode;
+import cc.jfire.jnet.common.buffer.buffer.IoBuffer;
+import cc.jfire.jnet.common.coder.TotalLengthFieldBasedFrameDecoder;
+import cc.jfire.jnet.common.processor.LengthEncoder;
+import cc.jfire.jnet.common.util.ChannelConfig;
+import cc.jfire.webcli.config.WebCliConfig;
+import cc.jfire.webcli.crypto.AesGcmCrypto;
+import cc.jfire.webcli.protocol.PtyInfo;
+import cc.jfire.webcli.protocol.TcpMessage;
+import cc.jfire.webcli.protocol.TcpMessageType;
+import cc.jfire.webcli.pty.PtyInstance;
+import cc.jfire.webcli.pty.PtyManager;
+import lombok.extern.slf4j.Slf4j;
+
+import javax.crypto.KeyAgreement;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.PrivateKey;
+import java.security.PublicKey;
+import java.security.SecureRandom;
+import java.security.spec.X509EncodedKeySpec;
+import java.util.Base64;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
+
+@Slf4j
+public class AgentTcpClient implements ReadProcessor<IoBuffer> {
+    private final WebCliConfig config;
+    private final PtyManager ptyManager;
+    private final String agentId = UUID.randomUUID().toString();
+    private final SecureRandom secureRandom = new SecureRandom();
+    private ClientChannel clientChannel;
+    private Pipeline pipeline;
+    private AesGcmCrypto crypto;
+    private volatile boolean authenticated = false;
+    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    private final Map<String, Consumer<String>> ptyOutputListeners = new ConcurrentHashMap<>();
+    private final JfireSE jfireSE = JfireSE.config().build();
+    private KeyPair clientKeyPair;
+    private byte[] clientNonce;
+    private String clientPubKey;
+    private byte[] sessionKey;
+
+    public AgentTcpClient(WebCliConfig config, PtyManager ptyManager) {
+        this.config = config;
+        this.ptyManager = ptyManager;
+    }
+
+    public void connect() {
+        ChannelConfig channelConfig = new ChannelConfig()
+                .setIp(config.getServerHost())
+                .setPort(config.getServerPort());
+
+        clientChannel = ClientChannel.newClient(channelConfig, pipeline -> {
+            pipeline.addReadProcessor(new TotalLengthFieldBasedFrameDecoder(0, 4, 4, 1024 * 1024));
+            pipeline.addReadProcessor(AgentTcpClient.this);
+            pipeline.addWriteProcessor(new LengthEncoder(0, 4));
+        });
+
+        if (clientChannel.connect()) {
+            this.pipeline = clientChannel.pipeline();
+            log.info("已连接到远端服务器: {}:{}", config.getServerHost(), config.getServerPort());
+            sendAuthRequest();
+            startHeartbeat();
+        } else {
+            log.error("连接远端服务器失败: {}:{}", config.getServerHost(), config.getServerPort());
+            scheduleReconnect();
+        }
+    }
+
+    private void sendAuthRequest() {
+        try {
+            clientKeyPair = KeyPairGenerator.getInstance("X25519").generateKeyPair();
+            clientPubKey = Base64.getEncoder().encodeToString(clientKeyPair.getPublic().getEncoded());
+
+            clientNonce = new byte[32];
+            secureRandom.nextBytes(clientNonce);
+            String clientNonceB64 = Base64.getEncoder().encodeToString(clientNonce);
+
+            String macInput = String.join("|", "AUTH_REQUEST", agentId, clientPubKey, clientNonceB64);
+            String clientMac = Base64.getEncoder().encodeToString(hmacSha256(tokenBytes(), macInput.getBytes(StandardCharsets.UTF_8)));
+
+            TcpMessage msg = new TcpMessage();
+            msg.setType(TcpMessageType.AUTH_REQUEST);
+            msg.setAgentId(agentId);
+            msg.setClientNonce(clientNonceB64);
+            msg.setClientPubKey(clientPubKey);
+            msg.setClientMac(clientMac);
+            sendMessage(msg, false); // 握手阶段明文
+        } catch (Exception e) {
+            log.error("发送认证请求失败", e);
+        }
+    }
+
+    private void startHeartbeat() {
+        scheduler.scheduleAtFixedRate(() -> {
+            if (authenticated && clientChannel != null && clientChannel.alive()) {
+                TcpMessage msg = new TcpMessage();
+                msg.setType(TcpMessageType.HEARTBEAT);
+                sendMessage(msg, true);
+            }
+        }, 30, 30, TimeUnit.SECONDS);
+    }
+
+    private void scheduleReconnect() {
+        scheduler.schedule(() -> {
+            log.info("尝试重新连接...");
+            connect();
+        }, 5, TimeUnit.SECONDS);
+    }
+
+    @Override
+    public void read(IoBuffer buffer, ReadProcessorNode next) {
+        try {
+            byte[] data = new byte[buffer.remainRead()];
+            buffer.get(data);
+
+            byte[] decrypted;
+            if (authenticated && crypto != null) {
+                decrypted = crypto.decrypt(data);
+            } else {
+                decrypted = data;
+            }
+
+            TcpMessage msg = (TcpMessage) jfireSE.deSerialize(decrypted);
+            handleMessage(msg);
+        } catch (Exception e) {
+            log.error("处理消息失败", e);
+        } finally {
+            buffer.free();
+        }
+    }
+
+    private void handleMessage(TcpMessage msg) {
+        switch (msg.getType()) {
+            case AUTH_RESPONSE -> handleAuthResponse(msg);
+            case PTY_LIST_REQUEST -> handlePtyListRequest();
+            case PTY_INPUT -> handlePtyInput(msg);
+            case PTY_RESIZE -> handlePtyResize(msg);
+            case PTY_CLOSE -> handlePtyClose(msg);
+            case PTY_ATTACH -> handlePtyAttach(msg);
+            case PTY_DETACH -> handlePtyDetach(msg);
+            case HEARTBEAT -> {} // 忽略心跳响应
+            default -> log.warn("未知消息类型: {}", msg.getType());
+        }
+    }
+
+    private void handleAuthResponse(TcpMessage msg) {
+        try {
+            String serverPubKey = msg.getServerPubKey();
+            String serverNonceB64 = msg.getServerNonce();
+            String serverMac = msg.getServerMac();
+
+            if (serverPubKey == null || serverNonceB64 == null || serverMac == null) {
+                log.error("认证响应缺少必要字段");
+                return;
+            }
+
+            // 校验 serverMac：HMAC(token, "AUTH_RESPONSE"||agentId||serverPubKey||serverNonce||clientPubKey||clientNonce)
+            String clientNonceB64 = Base64.getEncoder().encodeToString(clientNonce);
+            String macInput = String.join("|", "AUTH_RESPONSE", agentId, serverPubKey, serverNonceB64, clientPubKey, clientNonceB64);
+            String expectedServerMac = Base64.getEncoder().encodeToString(hmacSha256(tokenBytes(), macInput.getBytes(StandardCharsets.UTF_8)));
+            if (!expectedServerMac.equals(serverMac)) {
+                log.error("认证失败：serverMac 校验不通过");
+                return;
+            }
+
+            byte[] serverNonce = Base64.getDecoder().decode(serverNonceB64);
+            PublicKey serverPublicKey = decodeX25519PublicKey(serverPubKey);
+            byte[] sharedSecret = computeSharedSecret(clientKeyPair.getPrivate(), serverPublicKey);
+
+            // 派生会话密钥：HMAC(token, sharedSecret || clientNonce || serverNonce)
+            sessionKey = hmacSha256(tokenBytes(), concat(sharedSecret, clientNonce, serverNonce));
+            crypto = new AesGcmCrypto(sessionKey);
+
+            // 回发 AUTH_FINISH（基于 sessionKey 的 MAC），Server 校验成功后才正式注册 Agent
+            String finishInput = String.join("|", "AUTH_FINISH", agentId);
+            String finishMac = Base64.getEncoder().encodeToString(hmacSha256(sessionKey, finishInput.getBytes(StandardCharsets.UTF_8)));
+            TcpMessage finish = new TcpMessage();
+            finish.setType(TcpMessageType.AUTH_FINISH);
+            finish.setAgentId(agentId);
+            finish.setFinishMac(finishMac);
+            sendMessage(finish, false); // AUTH_FINISH 明文
+
+            authenticated = true;
+            log.info("认证成功，会话密钥已建立");
+        } catch (Exception e) {
+            log.error("处理认证响应失败", e);
+        }
+    }
+
+    private void handlePtyListRequest() {
+        List<PtyInstance> remoteViewablePtys = ptyManager.getAll().stream()
+                .filter(PtyInstance::isRemoteViewable)
+                .toList();
+
+        TcpMessage response = new TcpMessage();
+        response.setType(TcpMessageType.PTY_LIST_RESPONSE);
+        response.setAgentId(agentId);
+        response.setData(Dson.toJson(remoteViewablePtys.stream()
+                .map(pty -> new PtyInfo(
+                        pty.getId(), pty.getName(), pty.isAlive(), pty.isRemoteViewable()))
+                .toList()));
+        sendMessage(response, true);
+    }
+
+    private void handlePtyInput(TcpMessage msg) {
+        PtyInstance pty = ptyManager.get(msg.getPtyId());
+        if (pty != null && pty.isRemoteViewable()) {
+            try {
+                String decoded = new String(Base64.getDecoder().decode(msg.getData()), StandardCharsets.UTF_8);
+                pty.write(decoded);
+            } catch (Exception e) {
+                log.error("写入 PTY 失败", e);
+            }
+        }
+    }
+
+    private void handlePtyResize(TcpMessage msg) {
+        PtyInstance pty = ptyManager.get(msg.getPtyId());
+        if (pty != null && pty.isRemoteViewable() && msg.getCols() != null && msg.getRows() != null) {
+            pty.resize(msg.getCols(), msg.getRows());
+        }
+    }
+
+    private void handlePtyClose(TcpMessage msg) {
+        PtyInstance pty = ptyManager.get(msg.getPtyId());
+        if (pty != null && pty.isRemoteViewable()) {
+            ptyManager.remove(msg.getPtyId());
+        }
+    }
+
+    private void handlePtyAttach(TcpMessage msg) {
+        PtyInstance pty = ptyManager.get(msg.getPtyId());
+        if (pty != null && pty.isRemoteViewable()) {
+            // 创建输出监听器，将输出转发到远端
+            Consumer<String> listener = output -> {
+                TcpMessage outMsg = new TcpMessage();
+                outMsg.setType(TcpMessageType.PTY_OUTPUT);
+                outMsg.setPtyId(pty.getId());
+                outMsg.setAgentId(agentId);
+                outMsg.setData(Base64.getEncoder().encodeToString(output.getBytes(StandardCharsets.UTF_8)));
+                sendMessage(outMsg, true);
+            };
+
+            // 保存监听器引用以便后续移除
+            ptyOutputListeners.put(msg.getPtyId(), listener);
+            // 注册到 PtyInstance
+            pty.addOutputListener(listener);
+
+            // 发送历史输出
+            String history = pty.getOutputHistory();
+            if (history != null && !history.isEmpty()) {
+                TcpMessage historyMsg = new TcpMessage();
+                historyMsg.setType(TcpMessageType.PTY_OUTPUT);
+                historyMsg.setPtyId(pty.getId());
+                historyMsg.setAgentId(agentId);
+                historyMsg.setData(Base64.getEncoder().encodeToString(history.getBytes(StandardCharsets.UTF_8)));
+                sendMessage(historyMsg, true);
+            }
+        }
+    }
+
+    private void handlePtyDetach(TcpMessage msg) {
+        Consumer<String> listener = ptyOutputListeners.remove(msg.getPtyId());
+        if (listener != null) {
+            PtyInstance pty = ptyManager.get(msg.getPtyId());
+            if (pty != null) {
+                pty.removeOutputListener(listener);
+            }
+        }
+    }
+
+    private void sendMessage(TcpMessage msg, boolean encrypt) {
+        if (pipeline == null) return;
+
+        try {
+            byte[] data = jfireSE.serialize(msg);
+
+            if (encrypt && crypto != null) {
+                data = crypto.encrypt(data);
+            }
+
+            // 预留 4 字节 TotalLen，由 LengthEncoder(0,4) 回填整个帧长度
+            IoBuffer buffer = pipeline.allocator().allocate(data.length + 4);
+            buffer.putInt(0);
+            buffer.put(data);
+            pipeline.fireWrite(buffer);
+        } catch (Exception e) {
+            log.error("发送消息失败", e);
+        }
+    }
+
+    private byte[] tokenBytes() {
+        return config.getToken().getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static byte[] hmacSha256(byte[] key, byte[] data) throws Exception {
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(key, "HmacSHA256"));
+        return mac.doFinal(data);
+    }
+
+    private static byte[] concat(byte[]... parts) {
+        int total = 0;
+        for (byte[] part : parts) {
+            total += part.length;
+        }
+        byte[] out = new byte[total];
+        int offset = 0;
+        for (byte[] part : parts) {
+            System.arraycopy(part, 0, out, offset, part.length);
+            offset += part.length;
+        }
+        return out;
+    }
+
+    private static PublicKey decodeX25519PublicKey(String base64) throws Exception {
+        byte[] encoded = Base64.getDecoder().decode(base64);
+        KeyFactory keyFactory = KeyFactory.getInstance("X25519");
+        return keyFactory.generatePublic(new X509EncodedKeySpec(encoded));
+    }
+
+    private static byte[] computeSharedSecret(PrivateKey privateKey, PublicKey publicKey) throws Exception {
+        KeyAgreement agreement = KeyAgreement.getInstance("X25519");
+        agreement.init(privateKey);
+        agreement.doPhase(publicKey, true);
+        return agreement.generateSecret();
+    }
+
+    @Override
+    public void readFailed(Throwable e, ReadProcessorNode next) {
+        log.error("连接断开", e);
+        authenticated = false;
+        scheduleReconnect();
+    }
+
+    public void shutdown() {
+        scheduler.shutdown();
+        if (clientChannel != null && pipeline != null) {
+            pipeline.shutdownInput();
+        }
+    }
+}

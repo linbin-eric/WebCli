@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebCli Terminal - Remote</title>
+    <link rel="stylesheet" href="lib/xterm.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1e1e1e;
+            color: #fff;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        .toolbar {
+            background: #2d2d2d;
+            padding: 8px 16px;
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            border-bottom: 1px solid #404040;
+        }
+        .toolbar button {
+            background: #0e639c;
+            color: #fff;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .toolbar button:hover { background: #1177bb; }
+        .toolbar button:disabled { background: #555; cursor: not-allowed; }
+        .toolbar .title {
+            font-size: 14px;
+            color: #4ec9b0;
+            margin-right: 16px;
+        }
+        .tabs {
+            display: flex;
+            gap: 2px;
+            margin-left: 16px;
+        }
+        .tab {
+            background: #2d2d2d;
+            color: #ccc;
+            border: none;
+            padding: 6px 16px;
+            cursor: pointer;
+            font-size: 13px;
+            border-radius: 4px 4px 0 0;
+        }
+        .tab.active { background: #1e1e1e; color: #fff; }
+        .tab .close {
+            margin-left: 8px;
+            opacity: 0.6;
+        }
+        .tab .close:hover { opacity: 1; }
+        #terminal-container {
+            flex: 1;
+            padding: 8px;
+        }
+        .status {
+            color: #888;
+            font-size: 12px;
+            margin-left: auto;
+        }
+        .status.connected { color: #4ec9b0; }
+        .status.disconnected { color: #f14c4c; }
+        .pty-list {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: #2d2d2d;
+            border: 1px solid #404040;
+            border-radius: 8px;
+            padding: 16px;
+            min-width: 300px;
+            max-height: 400px;
+            overflow-y: auto;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+            z-index: 1000;
+            display: none;
+        }
+        .pty-list.show { display: block; }
+        .pty-list h3 {
+            margin-bottom: 12px;
+            font-size: 16px;
+            color: #4ec9b0;
+        }
+        .pty-list-item {
+            padding: 8px 12px;
+            cursor: pointer;
+            border-radius: 4px;
+            margin-bottom: 4px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .pty-list-item:hover { background: #094771; }
+        .pty-list-item .name { font-size: 14px; }
+        .pty-list-item .agent { font-size: 12px; color: #888; }
+        .pty-list-empty {
+            color: #888;
+            text-align: center;
+            padding: 20px;
+        }
+        .overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 999;
+            display: none;
+        }
+        .overlay.show { display: block; }
+    </style>
+</head>
+<body>
+<div class="toolbar">
+    <span class="title">Remote Terminal</span>
+    <button id="btn-connect">连接终端</button>
+    <div class="tabs" id="tabs"></div>
+    <span class="status disconnected" id="status">未连接</span>
+</div>
+<div id="terminal-container"></div>
+<div class="overlay" id="overlay"></div>
+<div class="pty-list" id="pty-list">
+    <h3>可用终端</h3>
+    <div id="pty-list-content"></div>
+</div>
+
+<script src="lib/xterm.min.js"></script>
+<script src="lib/xterm-addon-fit.min.js"></script>
+<script>
+    const MessageType = {
+        PTY_OUTPUT: 'PTY_OUTPUT',
+        PTY_INPUT: 'PTY_INPUT',
+        PTY_RESIZE: 'PTY_RESIZE',
+        PTY_CLOSE: 'PTY_CLOSE',
+        PTY_REMOTE_LIST: 'PTY_REMOTE_LIST',
+        PTY_ATTACH: 'PTY_ATTACH',
+        ERROR: 'ERROR',
+        SUCCESS: 'SUCCESS'
+    };
+
+    class RemoteTerminal {
+        constructor() {
+            this.ws = null;
+            this.terminals = new Map();
+            this.fitAddons = new Map();
+            this.terminalNames = new Map();
+            this.currentPtyId = null;
+
+            this.init();
+        }
+
+        init() {
+            this.connect();
+
+            document.getElementById('btn-connect').addEventListener('click', () => this.showPtyList());
+            document.getElementById('overlay').addEventListener('click', () => this.hidePtyList());
+            window.addEventListener('resize', () => this.fitTerminal());
+        }
+
+        connect() {
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${location.host}/ws`;
+            this.ws = new WebSocket(wsUrl);
+
+            this.ws.onopen = () => {
+                this.updateStatus(true);
+            };
+
+            this.ws.onmessage = (e) => {
+                this.handleMessage(JSON.parse(e.data));
+            };
+
+            this.ws.onclose = () => {
+                this.updateStatus(false);
+                setTimeout(() => this.connect(), 3000);
+            };
+
+            this.ws.onerror = (e) => console.error('WebSocket error:', e);
+        }
+
+        handleMessage(msg) {
+            switch (msg.type) {
+                case MessageType.PTY_OUTPUT:
+                    const term = this.terminals.get(msg.ptyId);
+                    if (term && msg.data) {
+                        const decoded = atob(msg.data);
+                        const bytes = Uint8Array.from(decoded, c => c.charCodeAt(0));
+                        const text = new TextDecoder('utf-8').decode(bytes);
+                        term.write(text);
+                    }
+                    break;
+                case MessageType.PTY_REMOTE_LIST:
+                    this.displayPtyList(JSON.parse(msg.data));
+                    break;
+                case MessageType.SUCCESS:
+                    if (msg.ptyId && !this.terminals.has(msg.ptyId)) {
+                        // 附加成功，创建终端
+                        this.addTerminal(msg.ptyId);
+                    }
+                    break;
+                case MessageType.ERROR:
+                    console.error('Server error:', msg.data);
+                    alert('错误: ' + msg.data);
+                    break;
+            }
+        }
+
+        showPtyList() {
+            this.send({ type: MessageType.PTY_REMOTE_LIST });
+            document.getElementById('overlay').classList.add('show');
+            document.getElementById('pty-list').classList.add('show');
+        }
+
+        hidePtyList() {
+            document.getElementById('overlay').classList.remove('show');
+            document.getElementById('pty-list').classList.remove('show');
+        }
+
+        displayPtyList(list) {
+            const content = document.getElementById('pty-list-content');
+            if (!list || list.length === 0) {
+                content.innerHTML = '<div class="pty-list-empty">暂无可用终端</div>';
+                return;
+            }
+
+            content.innerHTML = list.map(pty => {
+                const [agentId, ptyId] = pty.id.split(':');
+                const shortAgentId = agentId.substring(0, 8);
+                return `
+                    <div class="pty-list-item" data-pty-id="${pty.id}">
+                        <span class="name">${pty.name}</span>
+                        <span class="agent">Agent: ${shortAgentId}...</span>
+                    </div>
+                `;
+            }).join('');
+
+            content.querySelectorAll('.pty-list-item').forEach(item => {
+                item.addEventListener('click', () => {
+                    const ptyId = item.dataset.ptyId;
+                    const name = item.querySelector('.name').textContent;
+                    this.attachPty(ptyId, name);
+                    this.hidePtyList();
+                });
+            });
+        }
+
+        attachPty(ptyId, name) {
+            if (this.terminals.has(ptyId)) {
+                this.switchTerminal(ptyId);
+                return;
+            }
+            this.terminalNames.set(ptyId, name);
+            this.send({ type: MessageType.PTY_ATTACH, ptyId });
+        }
+
+        addTerminal(ptyId) {
+            const term = new Terminal({
+                cursorBlink: true,
+                fontSize: 14,
+                fontFamily: '"Maple Mono NF", "MesloLGS NF", "Hack Nerd Font", Menlo, Monaco, "Courier New", monospace',
+                theme: {
+                    background: '#1e1e1e',
+                    foreground: '#d4d4d4'
+                }
+            });
+
+            const fitAddon = new FitAddon.FitAddon();
+            term.loadAddon(fitAddon);
+            this.terminals.set(ptyId, term);
+            this.fitAddons.set(ptyId, fitAddon);
+
+            term.onData(data => {
+                const encoded = btoa(unescape(encodeURIComponent(data)));
+                this.send({ type: MessageType.PTY_INPUT, ptyId, data: encoded });
+            });
+
+            term.onResize(({ cols, rows }) => {
+                this.send({ type: MessageType.PTY_RESIZE, ptyId, cols, rows });
+            });
+
+            this.addTab(ptyId);
+            this.switchTerminal(ptyId);
+        }
+
+        addTab(ptyId) {
+            const tabs = document.getElementById('tabs');
+            const tab = document.createElement('button');
+            tab.className = 'tab';
+            tab.dataset.ptyId = ptyId;
+            const name = this.terminalNames.get(ptyId) || ptyId;
+            tab.innerHTML = `<span class="tab-name">${name}</span><span class="close">×</span>`;
+
+            tab.addEventListener('click', (e) => {
+                if (e.target.classList.contains('close')) {
+                    this.closePty(ptyId);
+                } else {
+                    this.switchTerminal(ptyId);
+                }
+            });
+
+            tabs.appendChild(tab);
+        }
+
+        switchTerminal(ptyId) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelector(`.tab[data-pty-id="${ptyId}"]`)?.classList.add('active');
+
+            const container = document.getElementById('terminal-container');
+            container.innerHTML = '';
+
+            const term = this.terminals.get(ptyId);
+            const fitAddon = this.fitAddons.get(ptyId);
+            if (term && fitAddon) {
+                term.open(container);
+                fitAddon.fit();
+                term.focus();
+                this.currentPtyId = ptyId;
+
+                this.send({
+                    type: MessageType.PTY_RESIZE,
+                    ptyId,
+                    cols: term.cols,
+                    rows: term.rows
+                });
+            }
+        }
+
+        closePty(ptyId) {
+            this.send({ type: MessageType.PTY_CLOSE, ptyId });
+            this.terminals.get(ptyId)?.dispose();
+            this.terminals.delete(ptyId);
+            this.fitAddons.delete(ptyId);
+            this.terminalNames.delete(ptyId);
+
+            document.querySelector(`.tab[data-pty-id="${ptyId}"]`)?.remove();
+
+            if (this.currentPtyId === ptyId) {
+                const firstPty = this.terminals.keys().next().value;
+                if (firstPty) {
+                    this.switchTerminal(firstPty);
+                } else {
+                    this.currentPtyId = null;
+                }
+            }
+        }
+
+        fitTerminal() {
+            if (this.currentPtyId) {
+                const fitAddon = this.fitAddons.get(this.currentPtyId);
+                const term = this.terminals.get(this.currentPtyId);
+                if (fitAddon && term) {
+                    fitAddon.fit();
+                    this.send({
+                        type: MessageType.PTY_RESIZE,
+                        ptyId: this.currentPtyId,
+                        cols: term.cols,
+                        rows: term.rows
+                    });
+                }
+            }
+        }
+
+        send(msg) {
+            if (this.ws?.readyState === WebSocket.OPEN) {
+                this.ws.send(JSON.stringify(msg));
+            }
+        }
+
+        updateStatus(connected) {
+            const status = document.getElementById('status');
+            status.textContent = connected ? '已连接' : '未连接';
+            status.className = `status ${connected ? 'connected' : 'disconnected'}`;
+        }
+    }
+
+    new RemoteTerminal();
+</script>
+</body>
+</html>

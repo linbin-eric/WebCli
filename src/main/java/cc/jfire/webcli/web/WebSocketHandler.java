@@ -18,12 +18,14 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 
 @Slf4j
 public class WebSocketHandler implements ReadProcessor<Object>
 {
-    private final PtyManager                         ptyManager;
-    private final ConcurrentHashMap<String, String>  pipelinePtyMap = new ConcurrentHashMap<>();
+    private final PtyManager                                    ptyManager;
+    private final ConcurrentHashMap<String, String>             pipelinePtyMap         = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Consumer<String>>   pipelineOutputListeners = new ConcurrentHashMap<>();
 
     public WebSocketHandler(PtyManager ptyManager)
     {
@@ -79,6 +81,7 @@ public class WebSocketHandler implements ReadProcessor<Object>
                 case PTY_SWITCH -> handlePtySwitch(pipeline, msg);
                 case PTY_ATTACH -> handlePtyAttach(pipeline, msg);
                 case PTY_RENAME -> handlePtyRename(pipeline, msg);
+                case PTY_SET_REMOTE_VIEWABLE -> handleSetRemoteViewable(pipeline, msg);
                 default -> log.warn("未知消息类型: {}", msg.getType());
             }
         }
@@ -94,13 +97,20 @@ public class WebSocketHandler implements ReadProcessor<Object>
         String name = msg.getName();
         PtyInstance pty = ptyManager.create(name);
         pipelinePtyMap.put(pipeline.pipelineId(), pty.getId());
-        pty.setOutputConsumer(output -> {
+
+        // 创建输出监听器
+        Consumer<String> listener = output -> {
             WsMessage outMsg = new WsMessage();
             outMsg.setType(MessageType.PTY_OUTPUT);
             outMsg.setPtyId(pty.getId());
             outMsg.setData(Base64.getEncoder().encodeToString(output.getBytes(StandardCharsets.UTF_8)));
             sendMessage(pipeline, outMsg);
-        });
+        };
+        // 保存监听器引用
+        pipelineOutputListeners.put(pipeline.pipelineId(), listener);
+        // 注册到 PtyInstance
+        pty.addOutputListener(listener);
+
         pty.startReading();
         WsMessage response = new WsMessage();
         response.setType(MessageType.SUCCESS);
@@ -136,6 +146,16 @@ public class WebSocketHandler implements ReadProcessor<Object>
         String ptyId = msg.getPtyId() != null ? msg.getPtyId() : pipelinePtyMap.get(pipeline.pipelineId());
         if (ptyId != null)
         {
+            // 移除监听器
+            Consumer<String> listener = pipelineOutputListeners.remove(pipeline.pipelineId());
+            if (listener != null)
+            {
+                PtyInstance pty = ptyManager.get(ptyId);
+                if (pty != null)
+                {
+                    pty.removeOutputListener(listener);
+                }
+            }
             ptyManager.remove(ptyId);
             pipelinePtyMap.remove(pipeline.pipelineId());
             WsMessage response = new WsMessage();
@@ -146,7 +166,9 @@ public class WebSocketHandler implements ReadProcessor<Object>
 
     private void handlePtyList(Pipeline pipeline)
     {
-        List<PtyInfo> list     = ptyManager.getAll().stream().map(pty -> new PtyInfo(pty.getId(), pty.getName(), pty.isAlive())).toList();
+        List<PtyInfo> list     = ptyManager.getAll().stream()
+                .map(pty -> new PtyInfo(pty.getId(), pty.getName(), pty.isAlive(), pty.isRemoteViewable()))
+                .toList();
         WsMessage     response = new WsMessage();
         response.setType(MessageType.PTY_LIST);
         response.setData(Dson.toJson(list));
@@ -177,14 +199,31 @@ public class WebSocketHandler implements ReadProcessor<Object>
         {
             // 绑定当前连接到该 PTY
             pipelinePtyMap.put(pipeline.pipelineId(), msg.getPtyId());
-            // 设置输出消费者
-            pty.setOutputConsumer(output -> {
+
+            // 移除旧的监听器（如果有）
+            Consumer<String> oldListener = pipelineOutputListeners.remove(pipeline.pipelineId());
+            if (oldListener != null)
+            {
+                // 从之前的 PTY 移除监听器
+                for (PtyInstance p : ptyManager.getAll())
+                {
+                    p.removeOutputListener(oldListener);
+                }
+            }
+
+            // 创建新的输出监听器
+            Consumer<String> listener = output -> {
                 WsMessage outMsg = new WsMessage();
                 outMsg.setType(MessageType.PTY_OUTPUT);
                 outMsg.setPtyId(pty.getId());
                 outMsg.setData(Base64.getEncoder().encodeToString(output.getBytes(StandardCharsets.UTF_8)));
                 sendMessage(pipeline, outMsg);
-            });
+            };
+            // 保存监听器引用
+            pipelineOutputListeners.put(pipeline.pipelineId(), listener);
+            // 注册到 PtyInstance
+            pty.addOutputListener(listener);
+
             // 发送历史输出
             String history = pty.getOutputHistory();
             if (history != null && !history.isEmpty())
@@ -209,7 +248,16 @@ public class WebSocketHandler implements ReadProcessor<Object>
 
     private void handleClose(Pipeline pipeline)
     {
-        pipelinePtyMap.remove(pipeline.pipelineId());
+        String ptyId = pipelinePtyMap.remove(pipeline.pipelineId());
+        Consumer<String> listener = pipelineOutputListeners.remove(pipeline.pipelineId());
+        if (listener != null && ptyId != null)
+        {
+            PtyInstance pty = ptyManager.get(ptyId);
+            if (pty != null)
+            {
+                pty.removeOutputListener(listener);
+            }
+        }
     }
 
     private void handlePtyRename(Pipeline pipeline, WsMessage msg)
@@ -223,6 +271,25 @@ public class WebSocketHandler implements ReadProcessor<Object>
             response.setPtyId(msg.getPtyId());
             response.setName(pty.getName());
             sendMessage(pipeline, response);
+        }
+        else
+        {
+            sendError(pipeline, "PTY 不存在: " + msg.getPtyId());
+        }
+    }
+
+    private void handleSetRemoteViewable(Pipeline pipeline, WsMessage msg)
+    {
+        PtyInstance pty = ptyManager.get(msg.getPtyId());
+        if (pty != null)
+        {
+            pty.setRemoteViewable(msg.getRemoteViewable() != null && msg.getRemoteViewable());
+            WsMessage response = new WsMessage();
+            response.setType(MessageType.SUCCESS);
+            response.setPtyId(msg.getPtyId());
+            response.setRemoteViewable(pty.isRemoteViewable());
+            sendMessage(pipeline, response);
+            log.info("设置终端 {} 远程可见: {}", msg.getPtyId(), pty.isRemoteViewable());
         }
         else
         {
@@ -254,14 +321,7 @@ public class WebSocketHandler implements ReadProcessor<Object>
     @Override
     public void readFailed(Throwable e, ReadProcessorNode next)
     {
-        log.error("WebSocket 读取失败", e);
+        log.error("WebSocket 关闭", e);
         handleClose(next.pipeline());
     }
-
-//    @Override
-//    public void readCompleted(ReadProcessorNode next)
-//    {
-//        // 单次读取完成，不做任何处理，继续等待下一次读取
-//        // 连接关闭通过 readFailed 或 WebSocket Close 帧处理
-//    }
 }

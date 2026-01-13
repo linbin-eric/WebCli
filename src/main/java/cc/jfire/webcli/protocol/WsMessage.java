@@ -10,4 +10,5 @@ public class WsMessage {
     private String data;
     private Integer cols;
     private Integer rows;
+    private Boolean remoteViewable;
 }

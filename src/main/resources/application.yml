@@ -1,0 +1,20 @@
+webcli:
+  # 运行模式: agent、server 或 all
+  mode: all
+  # 预共享密钥(PSK)，用于认证
+  token: 123456
+  # Shell 配置（留空则自动检测）
+  shell:
+    cmd:
+    args:
+    directory:
+  # 远端服务器地址 (Agent 模式)
+  serverHost: localhost
+  # 远端服务器 TCP 端口 (Agent 模式)
+  serverPort: 9091
+  # TCP 监听端口 (Server 模式)
+  tcpPort: 9091
+  # 本地 Web 服务端口
+  webPort: 18080
+  # 远端 Web 服务端口 (Server/All 模式)
+  remoteWebPort: 18081

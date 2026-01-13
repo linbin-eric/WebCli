@@ -10,6 +10,8 @@ public enum MessageType {
     PTY_SWITCH,
     PTY_ATTACH,
     PTY_RENAME,
+    PTY_SET_REMOTE_VIEWABLE,  // 设置终端可远程查看属性
+    PTY_REMOTE_LIST,          // 获取可远程查看的终端列表
     ERROR,
     SUCCESS
 }

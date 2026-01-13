@@ -11,8 +11,10 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 
 @Slf4j
@@ -26,7 +28,8 @@ public class PtyInstance {
     private final OutputStream outputStream;
     private final StringBuilder outputHistory = new StringBuilder();
     private volatile boolean running = true;
-    private volatile Consumer<String> outputConsumer;
+    private final List<Consumer<String>> outputListeners = new CopyOnWriteArrayList<>();
+    private volatile boolean remoteViewable = false;
     private Thread readThread;
 
     public PtyInstance(String[] command, String name, String workingDirectory) throws IOException {
@@ -54,8 +57,16 @@ public class PtyInstance {
         this.outputStream = process.getOutputStream();
     }
 
-    public void setOutputConsumer(Consumer<String> consumer) {
-        this.outputConsumer = consumer;
+    public void addOutputListener(Consumer<String> listener) {
+        outputListeners.add(listener);
+    }
+
+    public void removeOutputListener(Consumer<String> listener) {
+        outputListeners.remove(listener);
+    }
+
+    public void setRemoteViewable(boolean remoteViewable) {
+        this.remoteViewable = remoteViewable;
     }
 
     public void startReading() {
@@ -74,9 +85,13 @@ public class PtyInstance {
                             outputHistory.delete(0, outputHistory.length() - MAX_HISTORY_SIZE);
                         }
                     }
-                    Consumer<String> consumer = outputConsumer;
-                    if (consumer != null) {
-                        consumer.accept(output);
+                    // 通知所有监听器
+                    for (Consumer<String> listener : outputListeners) {
+                        try {
+                            listener.accept(output);
+                        } catch (Exception e) {
+                            log.error("输出监听器处理失败", e);
+                        }
                     }
                 }
             } catch (IOException e) {
