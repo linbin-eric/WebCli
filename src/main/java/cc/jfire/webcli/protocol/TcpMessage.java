@@ -19,4 +19,5 @@ public class TcpMessage {
     private Integer cols;
     private Integer rows;
     private String agentId;  // Agent 标识
+    private Boolean remoteViewable;  // 远端可见性
 }

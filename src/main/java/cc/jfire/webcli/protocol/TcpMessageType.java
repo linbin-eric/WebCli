@@ -12,5 +12,6 @@ public enum TcpMessageType {
     PTY_CLOSE,
     HEARTBEAT,
     PTY_ATTACH,
-    PTY_DETACH
+    PTY_DETACH,
+    PTY_VISIBILITY_CHANGED
 }

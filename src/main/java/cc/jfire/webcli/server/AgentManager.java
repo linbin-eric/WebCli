@@ -16,6 +16,7 @@ public class AgentManager {
     private final Map<String, ServerTcpHandler> agents = new ConcurrentHashMap<>();
     private final Map<String, List<PtyInfo>> agentPtyLists = new ConcurrentHashMap<>();
     private final Map<String, BiConsumer<String, String>> ptyOutputListeners = new ConcurrentHashMap<>();
+    private final Map<String, BiConsumer<String, String>> visibilityDisabledCallbacks = new ConcurrentHashMap<>();
 
     public void registerAgent(String agentId, ServerTcpHandler handler) {
         agents.put(agentId, handler);
@@ -77,6 +78,30 @@ public class AgentManager {
 
     public void unregisterPtyOutputListener(String fullPtyId) {
         ptyOutputListeners.remove(fullPtyId);
+    }
+
+    public void handlePtyVisibilityDisabled(String agentId, String ptyId) {
+        String fullPtyId = agentId + ":" + ptyId;
+        // 移除输出监听器
+        ptyOutputListeners.remove(fullPtyId);
+        // 通知所有订阅该终端的远端客户端
+        notifyVisibilityDisabled(fullPtyId);
+    }
+
+    public void notifyVisibilityDisabled(String fullPtyId) {
+        BiConsumer<String, String> callback = visibilityDisabledCallbacks.get(fullPtyId);
+        if (callback != null) {
+            callback.accept(fullPtyId, "VISIBILITY_DISABLED");
+            visibilityDisabledCallbacks.remove(fullPtyId);
+        }
+    }
+
+    public void registerVisibilityDisabledCallback(String fullPtyId, BiConsumer<String, String> callback) {
+        visibilityDisabledCallbacks.put(fullPtyId, callback);
+    }
+
+    public void unregisterVisibilityDisabledCallback(String fullPtyId) {
+        visibilityDisabledCallbacks.remove(fullPtyId);
     }
 
     public ServerTcpHandler getAgentHandler(String agentId) {

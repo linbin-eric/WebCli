@@ -38,6 +38,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 @Slf4j
@@ -52,6 +53,7 @@ public class AgentTcpClient implements ReadProcessor<IoBuffer> {
     private volatile boolean authenticated = false;
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     private final Map<String, Consumer<String>> ptyOutputListeners = new ConcurrentHashMap<>();
+    private final Map<String, BiConsumer<String, Boolean>> ptyVisibilityListeners = new ConcurrentHashMap<>();
     private final JfireSE jfireSE = JfireSE.config().build();
     private KeyPair clientKeyPair;
     private byte[] clientNonce;
@@ -201,6 +203,7 @@ public class AgentTcpClient implements ReadProcessor<IoBuffer> {
 
             authenticated = true;
             log.info("认证成功，会话密钥已建立");
+            registerVisibilityListeners();
         } catch (Exception e) {
             log.error("处理认证响应失败", e);
         }
@@ -285,6 +288,44 @@ public class AgentTcpClient implements ReadProcessor<IoBuffer> {
             if (pty != null) {
                 pty.removeOutputListener(listener);
             }
+        }
+    }
+
+    private void registerVisibilityListeners() {
+        for (PtyInstance pty : ptyManager.getAll()) {
+            registerVisibilityListener(pty);
+        }
+        ptyManager.setOnPtyCreated(this::registerVisibilityListener);
+    }
+
+    private void registerVisibilityListener(PtyInstance pty) {
+        BiConsumer<String, Boolean> listener = (ptyId, visible) -> {
+            if (!visible) {
+                handleVisibilityDisabled(ptyId);
+            }
+        };
+        ptyVisibilityListeners.put(pty.getId(), listener);
+        pty.addVisibilityChangeListener(listener);
+    }
+
+    private void handleVisibilityDisabled(String ptyId) {
+        // 移除输出监听器
+        Consumer<String> outputListener = ptyOutputListeners.remove(ptyId);
+        if (outputListener != null) {
+            PtyInstance pty = ptyManager.get(ptyId);
+            if (pty != null) {
+                pty.removeOutputListener(outputListener);
+            }
+        }
+        // 通知服务端该终端已不可见
+        if (authenticated && pipeline != null) {
+            TcpMessage msg = new TcpMessage();
+            msg.setType(TcpMessageType.PTY_VISIBILITY_CHANGED);
+            msg.setPtyId(ptyId);
+            msg.setAgentId(agentId);
+            msg.setRemoteViewable(false);
+            sendMessage(msg, true);
+            log.info("通知服务端终端 {} 已关闭远端可见", ptyId);
         }
     }
 

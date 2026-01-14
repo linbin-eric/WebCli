@@ -146,6 +146,7 @@
         PTY_CLOSE: 'PTY_CLOSE',
         PTY_REMOTE_LIST: 'PTY_REMOTE_LIST',
         PTY_ATTACH: 'PTY_ATTACH',
+        PTY_VISIBILITY_DISABLED: 'PTY_VISIBILITY_DISABLED',
         ERROR: 'ERROR',
         SUCCESS: 'SUCCESS'
     };
@@ -210,11 +211,38 @@
                         this.addTerminal(msg.ptyId);
                     }
                     break;
+                case MessageType.PTY_VISIBILITY_DISABLED:
+                    this.handleVisibilityDisabled(msg.ptyId);
+                    break;
                 case MessageType.ERROR:
                     console.error('Server error:', msg.data);
                     alert('错误: ' + msg.data);
                     break;
             }
+        }
+
+        handleVisibilityDisabled(ptyId) {
+            const name = this.terminalNames.get(ptyId) || ptyId;
+            // 清理本地终端
+            this.terminals.get(ptyId)?.dispose();
+            this.terminals.delete(ptyId);
+            this.fitAddons.delete(ptyId);
+            this.terminalNames.delete(ptyId);
+            document.querySelector(`.tab[data-pty-id="${ptyId}"]`)?.remove();
+
+            // 切换到其他终端
+            if (this.currentPtyId === ptyId) {
+                const firstPty = this.terminals.keys().next().value;
+                if (firstPty) {
+                    this.switchTerminal(firstPty);
+                } else {
+                    this.currentPtyId = null;
+                    document.getElementById('terminal-container').innerHTML = '';
+                }
+            }
+
+            // 提示用户
+            alert(`终端 "${name}" 已被本地关闭远端可见`);
         }
 
         showPtyList() {

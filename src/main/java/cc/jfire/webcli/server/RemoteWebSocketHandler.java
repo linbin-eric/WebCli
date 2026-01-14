@@ -135,6 +135,19 @@ public class RemoteWebSocketHandler implements ReadProcessor<Object> {
                     sendMessage(pipeline, outMsg);
                 });
 
+                // 注册可见性禁用回调
+                agentManager.registerVisibilityDisabledCallback(fullPtyId, (ptyId, reason) -> {
+                    // 通知远端客户端终端已不可见
+                    WsMessage closeMsg = new WsMessage();
+                    closeMsg.setType(MessageType.PTY_VISIBILITY_DISABLED);
+                    closeMsg.setPtyId(ptyId);
+                    closeMsg.setData(reason);
+                    sendMessage(pipeline, closeMsg);
+                    // 清理本地状态
+                    pipelinePtyMap.remove(pipeline.pipelineId());
+                    log.info("终端 {} 已关闭远端可见，通知远端客户端断开", ptyId);
+                });
+
                 // 通知 Agent 附加到该终端
                 handler.sendPtyAttach(parts[1]);
 
@@ -154,6 +167,7 @@ public class RemoteWebSocketHandler implements ReadProcessor<Object> {
         String fullPtyId = pipelinePtyMap.remove(pipeline.pipelineId());
         if (fullPtyId != null) {
             agentManager.unregisterPtyOutputListener(fullPtyId);
+            agentManager.unregisterVisibilityDisabledCallback(fullPtyId);
             String[] parts = agentManager.parseFullPtyId(fullPtyId);
             if (parts != null) {
                 ServerTcpHandler handler = agentManager.getAgentHandler(parts[0]);

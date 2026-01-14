@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 @Slf4j
@@ -29,6 +30,7 @@ public class PtyInstance {
     private final StringBuilder outputHistory = new StringBuilder();
     private volatile boolean running = true;
     private final List<Consumer<String>> outputListeners = new CopyOnWriteArrayList<>();
+    private final List<BiConsumer<String, Boolean>> visibilityChangeListeners = new CopyOnWriteArrayList<>();
     private volatile boolean remoteViewable = false;
     private Thread readThread;
 
@@ -66,7 +68,29 @@ public class PtyInstance {
     }
 
     public void setRemoteViewable(boolean remoteViewable) {
+        boolean oldValue = this.remoteViewable;
         this.remoteViewable = remoteViewable;
+        if (oldValue != remoteViewable) {
+            for (BiConsumer<String, Boolean> listener : visibilityChangeListeners) {
+                try {
+                    listener.accept(this.id, remoteViewable);
+                } catch (Exception e) {
+                    log.error("可见性变更监听器处理失败", e);
+                }
+            }
+        }
+    }
+
+    public void addVisibilityChangeListener(BiConsumer<String, Boolean> listener) {
+        visibilityChangeListeners.add(listener);
+    }
+
+    public void removeVisibilityChangeListener(BiConsumer<String, Boolean> listener) {
+        visibilityChangeListeners.remove(listener);
+    }
+
+    public void clearOutputListeners() {
+        outputListeners.clear();
     }
 
     public void startReading() {

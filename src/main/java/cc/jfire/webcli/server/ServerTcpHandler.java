@@ -74,6 +74,7 @@ public class ServerTcpHandler implements ReadProcessor<IoBuffer> {
             case AUTH_FINISH -> handleAuthFinish(msg);
             case PTY_LIST_RESPONSE -> handlePtyListResponse(msg);
             case PTY_OUTPUT -> handlePtyOutput(msg);
+            case PTY_VISIBILITY_CHANGED -> handlePtyVisibilityChanged(msg);
             case HEARTBEAT -> sendHeartbeatResponse();
             default -> log.warn("未知消息类型: {}", msg.getType());
         }
@@ -168,6 +169,13 @@ public class ServerTcpHandler implements ReadProcessor<IoBuffer> {
 
     private void handlePtyOutput(TcpMessage msg) {
         agentManager.forwardPtyOutput(agentId, msg.getPtyId(), msg.getData());
+    }
+
+    private void handlePtyVisibilityChanged(TcpMessage msg) {
+        if (msg.getRemoteViewable() != null && !msg.getRemoteViewable()) {
+            agentManager.handlePtyVisibilityDisabled(agentId, msg.getPtyId());
+            log.info("终端 {}:{} 已关闭远端可见", agentId, msg.getPtyId());
+        }
     }
 
     private void sendHeartbeatResponse() {
