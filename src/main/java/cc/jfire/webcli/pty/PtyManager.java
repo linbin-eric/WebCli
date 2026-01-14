@@ -34,13 +34,21 @@ public class PtyManager {
     }
 
     public PtyInstance create(String name) throws IOException {
-        return create(defaultCommand, name);
+        return create(defaultCommand, name, 120, 40);
+    }
+
+    public PtyInstance create(String name, int cols, int rows) throws IOException {
+        return create(defaultCommand, name, cols, rows);
     }
 
     public PtyInstance create(String[] command, String name) throws IOException {
-        PtyInstance instance = new PtyInstance(command, name, workingDirectory);
+        return create(command, name, 120, 40);
+    }
+
+    public PtyInstance create(String[] command, String name, int cols, int rows) throws IOException {
+        PtyInstance instance = new PtyInstance(command, name, workingDirectory, cols, rows);
         instances.put(instance.getId(), instance);
-        log.info("创建 PTY 实例: {}, 名称: {}", instance.getId(), name);
+        log.info("创建 PTY 实例: {}, 名称: {}, 尺寸: {}x{}", instance.getId(), name, cols, rows);
         if (onPtyCreated != null) {
             onPtyCreated.accept(instance);
         }

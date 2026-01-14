@@ -6,8 +6,10 @@ import com.pty4j.WinSize;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
@@ -35,6 +37,10 @@ public class PtyInstance {
     private Thread readThread;
 
     public PtyInstance(String[] command, String name, String workingDirectory) throws IOException {
+        this(command, name, workingDirectory, 120, 40);
+    }
+
+    public PtyInstance(String[] command, String name, String workingDirectory, int cols, int rows) throws IOException {
         this.id = UUID.randomUUID().toString();
         this.name = name;
         Map<String, String> env = new HashMap<>(System.getenv());
@@ -51,8 +57,8 @@ public class PtyInstance {
                 .setEnvironment(env)
                 .setDirectory(workingDirectory)
                 .setConsole(false)
-                .setInitialColumns(120)
-                .setInitialRows(40)
+                .setInitialColumns(cols)
+                .setInitialRows(rows)
                 .start();
 
         this.inputStream = process.getInputStream();
@@ -96,10 +102,11 @@ public class PtyInstance {
     public void startReading() {
         readThread = Thread.startVirtualThread(() -> {
             try {
-                byte[] buffer = new byte[1024];
+                InputStreamReader reader = new InputStreamReader(inputStream, StandardCharsets.UTF_8);
+                char[] buffer = new char[1024];
                 int len;
-                while (running && (len = inputStream.read(buffer)) != -1) {
-                    String output = new String(buffer, 0, len, StandardCharsets.UTF_8);
+                while (running && (len = reader.read(buffer)) != -1) {
+                    String output = new String(buffer, 0, len);
                     log.debug("PTY 输出: {}", output.length() > 100 ? output.substring(0, 100) + "..." : output);
                     // 保存到历史缓冲区
                     synchronized (outputHistory) {

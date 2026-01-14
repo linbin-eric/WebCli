@@ -95,7 +95,9 @@ public class WebSocketHandler implements ReadProcessor<Object>
     private void handlePtyCreate(Pipeline pipeline, WsMessage msg) throws IOException
     {
         String name = msg.getName();
-        PtyInstance pty = ptyManager.create(name);
+        int cols = msg.getCols() != null ? msg.getCols() : 120;
+        int rows = msg.getRows() != null ? msg.getRows() : 40;
+        PtyInstance pty = ptyManager.create(name, cols, rows);
         pipelinePtyMap.put(pipeline.pipelineId(), pty.getId());
 
         // 创建输出监听器

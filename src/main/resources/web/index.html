@@ -6,6 +6,22 @@
     <title>WebCli Terminal</title>
     <link rel="stylesheet" href="lib/xterm.css">
     <style>
+        /* JetBrains Mono - 主要等宽字体 */
+        @font-face {
+            font-family: 'JetBrains Mono';
+            src: url('lib/fonts/JetBrainsMono-Regular.ttf') format('truetype');
+            font-weight: normal;
+            font-style: normal;
+            font-display: swap;
+        }
+        /* Nerd Fonts Symbols - 用于显示特殊图标字符 */
+        @font-face {
+            font-family: 'Symbols Nerd Font';
+            src: url('lib/fonts/SymbolsNerdFont-Regular.ttf') format('truetype');
+            font-weight: normal;
+            font-style: normal;
+            font-display: swap;
+        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -56,7 +72,8 @@
         .tab .close:hover { opacity: 1; }
         #terminal-container {
             flex: 1;
-            padding: 8px;
+            padding: 0;
+            overflow: hidden;
         }
         .status {
             color: #888;
@@ -99,6 +116,7 @@
 
 <script src="lib/xterm.min.js"></script>
 <script src="lib/xterm-addon-fit.min.js"></script>
+<script src="lib/xterm-addon-unicode11.min.js"></script>
 <script>
     const MessageType = {
         PTY_OUTPUT: 'PTY_OUTPUT',
@@ -253,6 +271,10 @@
                         const decoded = atob(msg.data);
                         const bytes = Uint8Array.from(decoded, c => c.charCodeAt(0));
                         const text = new TextDecoder('utf-8').decode(bytes);
+                        // 调试：检查是否有异常的控制序列
+                        if (text.includes('\x1b[') && text.length < 50) {
+                            console.log('ANSI sequence:', JSON.stringify(text));
+                        }
                         term.write(text);
                     }
                     break;
@@ -313,22 +335,58 @@
 
         createPty() {
             const name = `终端 ${this.nextTerminalNumber++}`;
-            this.send({ type: MessageType.PTY_CREATE, name });
+            // 先创建一个临时终端来获取实际尺寸
+            const tempTerm = new Terminal({
+                cursorBlink: true,
+                fontSize: 14,
+                fontFamily: '"JetBrains Mono", "Symbols Nerd Font", "Maple Mono NF", "MesloLGS NF", "Hack Nerd Font", "SF Mono", Menlo, Monaco, "Cascadia Code", "Roboto Mono", "Droid Sans Mono", "Liberation Mono", "Courier New", monospace',
+                theme: {
+                    background: '#1e1e1e',
+                    foreground: '#d4d4d4'
+                },
+                scrollback: 10000,
+                scrollOnUserInput: true
+            });
+            const tempFitAddon = new FitAddon.FitAddon();
+            tempTerm.loadAddon(tempFitAddon);
+
+            const container = document.getElementById('terminal-container');
+            tempTerm.open(container);
+
+            document.fonts.ready.then(() => {
+                tempFitAddon.fit();
+                const cols = tempTerm.cols;
+                const rows = tempTerm.rows;
+                console.log(`Creating PTY with size: ${cols}x${rows}`);
+                tempTerm.dispose();
+                container.innerHTML = '';
+
+                // 发送带尺寸的创建请求
+                this.send({ type: MessageType.PTY_CREATE, name, cols, rows });
+            });
         }
 
         addTerminal(ptyId, name, switchTo = true) {
             const term = new Terminal({
                 cursorBlink: true,
                 fontSize: 14,
-                fontFamily: '"Maple Mono NF", "MesloLGS NF", "Hack Nerd Font", Menlo, Monaco, "Courier New", monospace',
+                fontFamily: '"JetBrains Mono", "Symbols Nerd Font", "Maple Mono NF", "MesloLGS NF", "Hack Nerd Font", "SF Mono", Menlo, Monaco, "Cascadia Code", "Roboto Mono", "Droid Sans Mono", "Liberation Mono", "Courier New", monospace',
                 theme: {
                     background: '#1e1e1e',
                     foreground: '#d4d4d4'
-                }
+                },
+                scrollback: 10000,
+                scrollOnUserInput: true
             });
 
             const fitAddon = new FitAddon.FitAddon();
             term.loadAddon(fitAddon);
+
+            // 加载 Unicode11 插件以正确处理宽字符和表情符号
+            const unicode11Addon = new Unicode11Addon.Unicode11Addon();
+            term.loadAddon(unicode11Addon);
+            term.unicode.activeVersion = '11';
+
             this.terminals.set(ptyId, term);
             this.fitAddons.set(ptyId, fitAddon);
             this.terminalNames.set(ptyId, name);
@@ -383,15 +441,19 @@
             const fitAddon = this.fitAddons.get(ptyId);
             if (term && fitAddon) {
                 term.open(container);
-                fitAddon.fit();
-                term.focus();
-                this.currentPtyId = ptyId;
+                // 等待字体加载完成后再 fit，确保列数计算正确
+                document.fonts.ready.then(() => {
+                    fitAddon.fit();
+                    console.log(`Terminal size: ${term.cols}x${term.rows}, container: ${container.clientWidth}x${container.clientHeight}`);
+                    term.focus();
+                    this.currentPtyId = ptyId;
 
-                this.send({
-                    type: MessageType.PTY_RESIZE,
-                    ptyId,
-                    cols: term.cols,
-                    rows: term.rows
+                    this.send({
+                        type: MessageType.PTY_RESIZE,
+                        ptyId,
+                        cols: term.cols,
+                        rows: term.rows
+                    });
                 });
             }
         }
@@ -416,12 +478,14 @@
                 const fitAddon = this.fitAddons.get(this.currentPtyId);
                 const term = this.terminals.get(this.currentPtyId);
                 if (fitAddon && term) {
-                    fitAddon.fit();
-                    this.send({
-                        type: MessageType.PTY_RESIZE,
-                        ptyId: this.currentPtyId,
-                        cols: term.cols,
-                        rows: term.rows
+                    document.fonts.ready.then(() => {
+                        fitAddon.fit();
+                        this.send({
+                            type: MessageType.PTY_RESIZE,
+                            ptyId: this.currentPtyId,
+                            cols: term.cols,
+                            rows: term.rows
+                        });
                     });
                 }
             }
