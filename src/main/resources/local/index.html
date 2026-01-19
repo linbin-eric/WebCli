@@ -65,6 +65,20 @@
         .tab .remote-indicator.active {
             background: #4ec9b0;
         }
+        .theme-select {
+            background: #3c3c3c;
+            color: #fff;
+            border: 1px solid #555;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 13px;
+            cursor: pointer;
+            margin-left: auto;
+            margin-right: 8px;
+        }
+        .theme-select:hover {
+            background: #4c4c4c;
+        }
         #terminal-container {
             flex: 1;
             padding: 8px;
@@ -101,12 +115,52 @@
             width: 16px;
             text-align: center;
         }
+        .shortcuts {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            z-index: 1000;
+        }
+        .shortcuts button {
+            background: #0e639c;
+            color: #fff;
+            border: none;
+            padding: 10px 16px;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        }
+        .shortcuts button:hover { background: #1177bb; }
+        .shortcuts button:active { background: #0d5a8c; }
+        .arrow-keys {
+            display: grid;
+            grid-template-columns: repeat(3, 40px);
+            grid-template-rows: repeat(2, 40px);
+            gap: 4px;
+        }
+        .arrow-keys button {
+            padding: 8px;
+            font-size: 16px;
+        }
+        .arrow-keys .arrow-up { grid-column: 2; grid-row: 1; }
+        .arrow-keys .arrow-left { grid-column: 1; grid-row: 2; }
+        .arrow-keys .arrow-down { grid-column: 2; grid-row: 2; }
+        .arrow-keys .arrow-right { grid-column: 3; grid-row: 2; }
     </style>
 </head>
 <body>
 <div class="toolbar">
     <button id="btn-new">新建终端</button>
     <div class="tabs" id="tabs"></div>
+    <select class="theme-select" id="theme-select">
+        <option value="dark">深色主题</option>
+        <option value="light">浅色主题</option>
+        <option value="eye-care">护眼主题</option>
+    </select>
     <span class="status disconnected" id="status">未连接</span>
 </div>
 <div id="terminal-container"></div>
@@ -117,6 +171,17 @@
         <span>远程可见</span>
     </div>
     <div class="context-menu-item" id="menu-close">关闭终端</div>
+</div>
+<div class="shortcuts">
+    <div class="arrow-keys">
+        <button class="arrow-up" id="btn-arrow-up">↑</button>
+        <button class="arrow-left" id="btn-arrow-left">←</button>
+        <button class="arrow-down" id="btn-arrow-down">↓</button>
+        <button class="arrow-right" id="btn-arrow-right">→</button>
+    </div>
+    <button id="btn-enter">Shift+Enter</button>
+    <button id="btn-ctrl-c">Ctrl+C</button>
+    <button id="btn-ctrl-v">Ctrl+V</button>
 </div>
 
 <script src="lib/xterm.min.js"></script>
@@ -137,6 +202,59 @@
         SUCCESS: 'SUCCESS'
     };
 
+    const themes = {
+        dark: {
+            background: '#1e1e1e',
+            foreground: '#d4d4d4',
+            cursor: '#d4d4d4',
+            selectionBackground: '#264f78'
+        },
+        light: {
+            background: '#ffffff',
+            foreground: '#333333',
+            cursor: '#333333',
+            selectionBackground: '#add6ff',
+            black: '#000000',
+            red: '#c91b00',
+            green: '#00a000',
+            yellow: '#a08000',
+            blue: '#0225c7',
+            magenta: '#c930c7',
+            cyan: '#00a0a0',
+            white: '#555555',
+            brightBlack: '#676767',
+            brightRed: '#ff6d67',
+            brightGreen: '#00c200',
+            brightYellow: '#c7c400',
+            brightBlue: '#6871ff',
+            brightMagenta: '#ff76ff',
+            brightCyan: '#00c5c7',
+            brightWhite: '#333333'
+        },
+        'eye-care': {
+            background: '#f5f0e1',
+            foreground: '#5b4636',
+            cursor: '#5b4636',
+            selectionBackground: '#d4c4a8',
+            black: '#000000',
+            red: '#c91b00',
+            green: '#00a000',
+            yellow: '#a08000',
+            blue: '#0225c7',
+            magenta: '#c930c7',
+            cyan: '#00a0a0',
+            white: '#555555',
+            brightBlack: '#676767',
+            brightRed: '#ff6d67',
+            brightGreen: '#00c200',
+            brightYellow: '#c0a000',
+            brightBlue: '#6871ff',
+            brightMagenta: '#ff76ff',
+            brightCyan: '#00a0a0',
+            brightWhite: '#333333'
+        }
+    };
+
     class WebCliTerminal {
         constructor() {
             this.ws = null;
@@ -147,6 +265,7 @@
             this.currentPtyId = null;
             this.nextTerminalNumber = 1;
             this.contextMenuPtyId = null;
+            this.currentTheme = localStorage.getItem('webcli-theme') || 'dark';
 
             this.init();
         }
@@ -154,9 +273,88 @@
         init() {
             this.connect();
             this.initContextMenu();
+            this.initShortcuts();
+            this.initThemeSelector();
 
             document.getElementById('btn-new').addEventListener('click', () => this.createPty());
             window.addEventListener('resize', () => this.fitTerminal());
+        }
+
+        initThemeSelector() {
+            const selector = document.getElementById('theme-select');
+            selector.value = this.currentTheme;
+            selector.addEventListener('change', (e) => {
+                this.currentTheme = e.target.value;
+                localStorage.setItem('webcli-theme', this.currentTheme);
+                this.applyTheme();
+            });
+        }
+
+        applyTheme() {
+            const theme = themes[this.currentTheme];
+            // 更新页面背景
+            document.body.style.background = theme.background;
+            document.getElementById('terminal-container').style.background = theme.background;
+            // 更新所有终端的主题
+            this.terminals.forEach((term) => {
+                term.options.theme = theme;
+            });
+        }
+
+        initShortcuts() {
+            document.getElementById('btn-arrow-up').addEventListener('click', () => {
+                if (this.currentPtyId) {
+                    const encoded = btoa('\x1b[A');
+                    this.send({ type: MessageType.PTY_INPUT, ptyId: this.currentPtyId, data: encoded });
+                }
+            });
+
+            document.getElementById('btn-arrow-down').addEventListener('click', () => {
+                if (this.currentPtyId) {
+                    const encoded = btoa('\x1b[B');
+                    this.send({ type: MessageType.PTY_INPUT, ptyId: this.currentPtyId, data: encoded });
+                }
+            });
+
+            document.getElementById('btn-arrow-right').addEventListener('click', () => {
+                if (this.currentPtyId) {
+                    const encoded = btoa('\x1b[C');
+                    this.send({ type: MessageType.PTY_INPUT, ptyId: this.currentPtyId, data: encoded });
+                }
+            });
+
+            document.getElementById('btn-arrow-left').addEventListener('click', () => {
+                if (this.currentPtyId) {
+                    const encoded = btoa('\x1b[D');
+                    this.send({ type: MessageType.PTY_INPUT, ptyId: this.currentPtyId, data: encoded });
+                }
+            });
+
+            document.getElementById('btn-enter').addEventListener('click', () => {
+                if (this.currentPtyId) {
+                    const encoded = btoa('\n');
+                    this.send({ type: MessageType.PTY_INPUT, ptyId: this.currentPtyId, data: encoded });
+                }
+            });
+
+            document.getElementById('btn-ctrl-c').addEventListener('click', () => {
+                if (this.currentPtyId) {
+                    const encoded = btoa('\x03');
+                    this.send({ type: MessageType.PTY_INPUT, ptyId: this.currentPtyId, data: encoded });
+                }
+            });
+
+            document.getElementById('btn-ctrl-v').addEventListener('click', async () => {
+                try {
+                    const text = await navigator.clipboard.readText();
+                    if (this.currentPtyId && text) {
+                        const encoded = btoa(unescape(encodeURIComponent(text)));
+                        this.send({ type: MessageType.PTY_INPUT, ptyId: this.currentPtyId, data: encoded });
+                    }
+                } catch (e) {
+                    console.error('粘贴失败:', e);
+                }
+            });
         }
 
         initContextMenu() {
@@ -348,14 +546,12 @@
         }
 
         addTerminal(ptyId, name, switchTo = true) {
+            const theme = themes[this.currentTheme];
             const term = new Terminal({
                 cursorBlink: true,
                 fontSize: 14,
                 fontFamily: '"Maple Mono NF", "MesloLGS NF", "Hack Nerd Font", Menlo, Monaco, "Courier New", monospace',
-                theme: {
-                    background: '#1e1e1e',
-                    foreground: '#d4d4d4'
-                }
+                theme: theme
             });
 
             const fitAddon = new FitAddon.FitAddon();
