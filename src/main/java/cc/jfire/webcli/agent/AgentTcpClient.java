@@ -7,8 +7,8 @@ import cc.jfire.jnet.common.api.Pipeline;
 import cc.jfire.jnet.common.api.ReadProcessor;
 import cc.jfire.jnet.common.api.ReadProcessorNode;
 import cc.jfire.jnet.common.buffer.buffer.IoBuffer;
-import cc.jfire.jnet.common.coder.TotalLengthFieldBasedFrameDecoder;
-import cc.jfire.jnet.common.processor.LengthEncoder;
+import cc.jfire.jnet.common.coder.ValidatedLengthFrameDecoder;
+import cc.jfire.jnet.common.coder.ValidatedLengthFrameEncoder;
 import cc.jfire.jnet.common.util.ChannelConfig;
 import cc.jfire.webcli.config.WebCliConfig;
 import cc.jfire.webcli.crypto.AesGcmCrypto;
@@ -43,6 +43,9 @@ import java.util.function.Consumer;
 
 @Slf4j
 public class AgentTcpClient implements ReadProcessor<IoBuffer> {
+    /** 协议魔法值，用于帧验证 */
+    private static final int PROTOCOL_MAGIC = 0x57454243; // "WEBC" in hex
+
     private final WebCliConfig config;
     private final PtyManager ptyManager;
     private final String agentId = UUID.randomUUID().toString();
@@ -71,9 +74,9 @@ public class AgentTcpClient implements ReadProcessor<IoBuffer> {
                 .setPort(config.getServerPort());
 
         clientChannel = ClientChannel.newClient(channelConfig, pipeline -> {
-            pipeline.addReadProcessor(new TotalLengthFieldBasedFrameDecoder(0, 4, 4, 1024 * 1024));
+            pipeline.addReadProcessor(new ValidatedLengthFrameDecoder(PROTOCOL_MAGIC, 1024 * 1024));
             pipeline.addReadProcessor(AgentTcpClient.this);
-            pipeline.addWriteProcessor(new LengthEncoder(0, 4));
+            pipeline.addWriteProcessor(new ValidatedLengthFrameEncoder(PROTOCOL_MAGIC, pipeline.allocator()));
         });
 
         if (clientChannel.connect()) {
@@ -339,9 +342,8 @@ public class AgentTcpClient implements ReadProcessor<IoBuffer> {
                 data = crypto.encrypt(data);
             }
 
-            // 预留 4 字节 TotalLen，由 LengthEncoder(0,4) 回填整个帧长度
-            IoBuffer buffer = pipeline.allocator().allocate(data.length + 4);
-            buffer.putInt(0);
+            // ValidatedLengthFrameEncoder 会自动添加魔法值、长度和 CRC16
+            IoBuffer buffer = pipeline.allocator().allocate(data.length);
             buffer.put(data);
             pipeline.fireWrite(buffer);
         } catch (Exception e) {

@@ -8,8 +8,8 @@ import cc.jfire.jfire.core.prepare.annotation.ComponentScan;
 import cc.jfire.jfire.core.prepare.annotation.EnableAutoConfiguration;
 import cc.jfire.jfire.core.prepare.annotation.configuration.Configuration;
 import cc.jfire.jfire.core.prepare.annotation.PropertyPath;
-import cc.jfire.jnet.common.coder.TotalLengthFieldBasedFrameDecoder;
-import cc.jfire.jnet.common.processor.LengthEncoder;
+import cc.jfire.jnet.common.coder.ValidatedLengthFrameDecoder;
+import cc.jfire.jnet.common.coder.ValidatedLengthFrameEncoder;
 import cc.jfire.jnet.common.util.ChannelConfig;
 import cc.jfire.jnet.server.AioServer;
 import cc.jfire.webcli.agent.AgentTcpClient;
@@ -28,6 +28,9 @@ import lombok.extern.slf4j.Slf4j;
 @ComponentScan("cc.jfire.webcli")
 public class WebApplication
 {
+    /** 协议魔法值，用于帧验证 */
+    private static final int PROTOCOL_MAGIC = 0x57454243; // "WEBC" in hex
+
     @Resource
     private              WebCliConfig   config;
     private              AioServer      localWebServer;
@@ -140,9 +143,9 @@ public class WebApplication
     {
         ChannelConfig tcpConfig = new ChannelConfig().setIp("0.0.0.0").setPort(config.getTcpPort()).setChannelGroup(ChannelConfig.DEFAULT_CHANNEL_GROUP);
         tcpServer = AioServer.newAioServer(tcpConfig, pipeline -> {
-            pipeline.addReadProcessor(new TotalLengthFieldBasedFrameDecoder(0, 4, 4, 1024 * 1024));
+            pipeline.addReadProcessor(new ValidatedLengthFrameDecoder(PROTOCOL_MAGIC, 1024 * 1024));
             pipeline.addReadProcessor(new ServerTcpHandler(config, agentManager));
-            pipeline.addWriteProcessor(new LengthEncoder(0, 4));
+            pipeline.addWriteProcessor(new ValidatedLengthFrameEncoder(PROTOCOL_MAGIC, pipeline.allocator()));
         });
         tcpServer.start();
         log.info("TCP 服务已启动，监听端口: {}", config.getTcpPort());

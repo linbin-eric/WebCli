@@ -194,9 +194,8 @@ public class ServerTcpHandler implements ReadProcessor<IoBuffer> {
                 data = crypto.encrypt(data);
             }
 
-            // 预留 4 字节 TotalLen，由 LengthEncoder(0,4) 回填整个帧长度
-            IoBuffer buffer = pipeline.allocator().allocate(data.length + 4);
-            buffer.putInt(0);
+            // ValidatedLengthFrameEncoder 会自动添加魔法值、长度和 CRC16
+            IoBuffer buffer = pipeline.allocator().allocate(data.length);
             buffer.put(data);
             pipeline.fireWrite(buffer);
         } catch (Exception e) {
