@@ -134,6 +134,27 @@
         .theme-select:hover {
             background: #4c4c4c;
         }
+        .flush-interval {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            margin-right: 8px;
+            font-size: 12px;
+            color: #888;
+        }
+        .flush-interval input {
+            width: 50px;
+            background: #3c3c3c;
+            color: #fff;
+            border: 1px solid #555;
+            padding: 4px 6px;
+            border-radius: 4px;
+            font-size: 12px;
+            text-align: center;
+        }
+        .flush-interval input:hover {
+            background: #4c4c4c;
+        }
         .shortcuts {
             position: fixed;
             bottom: 20px;
@@ -176,6 +197,11 @@
     <span class="title">Remote Terminal</span>
     <button id="btn-connect">连接终端</button>
     <div class="tabs" id="tabs"></div>
+    <div class="flush-interval">
+        <span>刷新间隔:</span>
+        <input type="number" id="flush-interval" min="0" max="500" value="50">
+        <span>ms</span>
+    </div>
     <select class="theme-select" id="theme-select">
         <option value="dark">深色主题</option>
         <option value="light">浅色主题</option>
@@ -209,6 +235,7 @@
         PTY_INPUT: 'PTY_INPUT',
         PTY_RESIZE: 'PTY_RESIZE',
         PTY_CLOSE: 'PTY_CLOSE',
+        PTY_DETACH: 'PTY_DETACH',
         PTY_REMOTE_LIST: 'PTY_REMOTE_LIST',
         PTY_ATTACH: 'PTY_ATTACH',
         PTY_VISIBILITY_DISABLED: 'PTY_VISIBILITY_DISABLED',
@@ -278,6 +305,13 @@
             this.currentPtyId = null;
             this.currentTheme = localStorage.getItem('webcli-theme') || 'dark';
 
+            // 输出缓冲相关
+            this.outputBuffers = new Map();  // ptyId -> 缓冲的文本
+            this.outputTimers = new Map();   // ptyId -> 定时器ID
+            this.outputRafIds = new Map();   // ptyId -> requestAnimationFrame ID
+            this.flushInterval = parseInt(localStorage.getItem('webcli-flush-interval')) || 50;
+            this.lastFlushTime = new Map();  // ptyId -> 上次刷新时间
+
             this.init();
         }
 
@@ -285,6 +319,7 @@
             this.connect();
             this.initShortcuts();
             this.initThemeSelector();
+            this.initFlushIntervalSelector();
 
             document.getElementById('btn-connect').addEventListener('click', () => this.showPtyList());
             document.getElementById('overlay').addEventListener('click', () => this.hidePtyList());
@@ -357,6 +392,17 @@
             });
         }
 
+        initFlushIntervalSelector() {
+            const input = document.getElementById('flush-interval');
+            input.value = this.flushInterval;
+            input.addEventListener('change', (e) => {
+                const value = parseInt(e.target.value) || 0;
+                this.flushInterval = Math.max(0, Math.min(500, value));
+                input.value = this.flushInterval;
+                localStorage.setItem('webcli-flush-interval', this.flushInterval.toString());
+            });
+        }
+
         applyTheme() {
             const theme = themes[this.currentTheme];
             document.body.style.background = theme.background;
@@ -366,6 +412,60 @@
             });
         }
 
+        // 缓冲输出并使用 requestAnimationFrame 刷新
+        bufferOutput(ptyId, text) {
+            const existing = this.outputBuffers.get(ptyId) || '';
+            this.outputBuffers.set(ptyId, existing + text);
+
+            // 如果已经有 RAF 请求，不需要再次请求
+            if (this.outputRafIds.has(ptyId)) {
+                return;
+            }
+
+            const now = performance.now();
+            const lastFlush = this.lastFlushTime.get(ptyId) || 0;
+            const elapsed = now - lastFlush;
+
+            if (this.flushInterval === 0) {
+                // 如果间隔为0，使用 RAF 立即刷新
+                const rafId = requestAnimationFrame(() => {
+                    this.flushOutput(ptyId);
+                });
+                this.outputRafIds.set(ptyId, rafId);
+            } else if (elapsed >= this.flushInterval) {
+                // 如果已经超过间隔时间，使用 RAF 刷新
+                const rafId = requestAnimationFrame(() => {
+                    this.flushOutput(ptyId);
+                });
+                this.outputRafIds.set(ptyId, rafId);
+            } else {
+                // 否则设置定时器等待
+                const timerId = setTimeout(() => {
+                    this.outputTimers.delete(ptyId);
+                    const rafId = requestAnimationFrame(() => {
+                        this.flushOutput(ptyId);
+                    });
+                    this.outputRafIds.set(ptyId, rafId);
+                }, this.flushInterval - elapsed);
+                this.outputTimers.set(ptyId, timerId);
+            }
+        }
+
+        // 刷新缓冲的输出到终端
+        flushOutput(ptyId) {
+            const buffer = this.outputBuffers.get(ptyId);
+            this.outputBuffers.delete(ptyId);
+            this.outputRafIds.delete(ptyId);
+            this.lastFlushTime.set(ptyId, performance.now());
+
+            if (buffer) {
+                const term = this.terminals.get(ptyId);
+                if (term) {
+                    term.write(buffer);
+                }
+            }
+        }
+
         connect() {
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = `${protocol}//${location.host}/ws`;
@@ -373,6 +473,8 @@
 
             this.ws.onopen = () => {
                 this.updateStatus(true);
+                // 重连后，重新 attach 所有已打开的终端
+                this.reattachAllTerminals();
             };
 
             this.ws.onmessage = (e) => {
@@ -387,15 +489,37 @@
             this.ws.onerror = (e) => console.error('WebSocket error:', e);
         }
 
+        reattachAllTerminals() {
+            if (this.terminals.size === 0) return;
+
+            console.log('WebSocket 重连，重新 attach', this.terminals.size, '个终端');
+            for (const ptyId of this.terminals.keys()) {
+                // 清空终端内容，准备接收历史输出
+                const term = this.terminals.get(ptyId);
+                if (term) {
+                    term.clear();
+                }
+                this.send({ type: MessageType.PTY_ATTACH, ptyId });
+                // 重新发送当前终端大小
+                if (term) {
+                    this.send({
+                        type: MessageType.PTY_RESIZE,
+                        ptyId,
+                        cols: term.cols,
+                        rows: term.rows
+                    });
+                }
+            }
+        }
+
         handleMessage(msg) {
             switch (msg.type) {
                 case MessageType.PTY_OUTPUT:
-                    const term = this.terminals.get(msg.ptyId);
-                    if (term && msg.data) {
+                    if (msg.ptyId && msg.data) {
                         const decoded = atob(msg.data);
                         const bytes = Uint8Array.from(decoded, c => c.charCodeAt(0));
                         const text = new TextDecoder('utf-8').decode(bytes);
-                        term.write(text);
+                        this.bufferOutput(msg.ptyId, text);
                     }
                     break;
                 case MessageType.PTY_REMOTE_LIST:
@@ -424,6 +548,21 @@
             this.terminals.delete(ptyId);
             this.fitAddons.delete(ptyId);
             this.terminalNames.delete(ptyId);
+
+            // 清理输出缓冲
+            const timerId = this.outputTimers.get(ptyId);
+            if (timerId) {
+                clearTimeout(timerId);
+                this.outputTimers.delete(ptyId);
+            }
+            const rafId = this.outputRafIds.get(ptyId);
+            if (rafId) {
+                cancelAnimationFrame(rafId);
+                this.outputRafIds.delete(ptyId);
+            }
+            this.outputBuffers.delete(ptyId);
+            this.lastFlushTime.delete(ptyId);
+
             document.querySelector(`.tab[data-pty-id="${ptyId}"]`)?.remove();
 
             // 切换到其他终端
@@ -495,7 +634,9 @@
                 cursorBlink: true,
                 fontSize: 14,
                 fontFamily: '"Maple Mono NF", "MesloLGS NF", "Hack Nerd Font", Menlo, Monaco, "Courier New", monospace',
-                theme: theme
+                theme: theme,
+                scrollback: 5000,
+                smoothScrollDuration: 0
             });
 
             const fitAddon = new FitAddon.FitAddon();
@@ -560,11 +701,26 @@
         }
 
         closePty(ptyId) {
-            this.send({ type: MessageType.PTY_CLOSE, ptyId });
+            // 发送 DETACH 而不是 CLOSE，只断开远端连接，不关闭本地 PTY
+            this.send({ type: MessageType.PTY_DETACH, ptyId });
             this.terminals.get(ptyId)?.dispose();
             this.terminals.delete(ptyId);
             this.fitAddons.delete(ptyId);
             this.terminalNames.delete(ptyId);
+
+            // 清理输出缓冲
+            const timerId = this.outputTimers.get(ptyId);
+            if (timerId) {
+                clearTimeout(timerId);
+                this.outputTimers.delete(ptyId);
+            }
+            const rafId = this.outputRafIds.get(ptyId);
+            if (rafId) {
+                cancelAnimationFrame(rafId);
+                this.outputRafIds.delete(ptyId);
+            }
+            this.outputBuffers.delete(ptyId);
+            this.lastFlushTime.delete(ptyId);
 
             document.querySelector(`.tab[data-pty-id="${ptyId}"]`)?.remove();
 

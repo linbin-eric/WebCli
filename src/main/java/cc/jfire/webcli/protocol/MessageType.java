@@ -6,6 +6,7 @@ public enum MessageType {
     PTY_RESIZE,
     PTY_CREATE,
     PTY_CLOSE,
+    PTY_DETACH,               // 远端断开连接（不关闭本地 PTY）
     PTY_LIST,
     PTY_SWITCH,
     PTY_ATTACH,

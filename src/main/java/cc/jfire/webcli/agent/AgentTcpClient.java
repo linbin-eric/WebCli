@@ -392,7 +392,34 @@ public class AgentTcpClient implements ReadProcessor<IoBuffer> {
     public void readFailed(Throwable e, ReadProcessorNode next) {
         log.error("连接断开", e);
         authenticated = false;
+        // 清理所有 PTY 输出监听器
+        cleanupPtyListeners();
         scheduleReconnect();
+    }
+
+    private void cleanupPtyListeners() {
+        // 移除所有已注册到 PtyInstance 的输出监听器
+        for (Map.Entry<String, Consumer<String>> entry : ptyOutputListeners.entrySet()) {
+            String ptyId = entry.getKey();
+            Consumer<String> listener = entry.getValue();
+            PtyInstance pty = ptyManager.get(ptyId);
+            if (pty != null) {
+                pty.removeOutputListener(listener);
+                log.debug("已移除 PTY {} 的输出监听器", ptyId);
+            }
+        }
+        ptyOutputListeners.clear();
+
+        // 移除所有可见性监听器
+        for (Map.Entry<String, BiConsumer<String, Boolean>> entry : ptyVisibilityListeners.entrySet()) {
+            String ptyId = entry.getKey();
+            BiConsumer<String, Boolean> listener = entry.getValue();
+            PtyInstance pty = ptyManager.get(ptyId);
+            if (pty != null) {
+                pty.removeVisibilityChangeListener(listener);
+            }
+        }
+        ptyVisibilityListeners.clear();
     }
 
     public void shutdown() {

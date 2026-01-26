@@ -56,6 +56,7 @@ public class RemoteWebSocketHandler implements ReadProcessor<Object> {
                 case PTY_INPUT -> handlePtyInput(pipeline, msg);
                 case PTY_RESIZE -> handlePtyResize(pipeline, msg);
                 case PTY_CLOSE -> handlePtyClose(pipeline, msg);
+                case PTY_DETACH -> handlePtyDetach(pipeline, msg);
                 case PTY_ATTACH -> handlePtyAttach(pipeline, msg);
                 default -> log.warn("远端 Web 不支持的消息类型: {}", msg.getType());
             }
@@ -105,11 +106,39 @@ public class RemoteWebSocketHandler implements ReadProcessor<Object> {
         String fullPtyId = msg.getPtyId();
         String[] parts = agentManager.parseFullPtyId(fullPtyId);
         if (parts != null) {
-            ServerTcpHandler handler = agentManager.getAgentHandler(parts[0]);
+            String agentId = parts[0];
+            String ptyId = parts[1];
+            ServerTcpHandler handler = agentManager.getAgentHandler(agentId);
             if (handler != null) {
-                handler.sendPtyClose(parts[1]);
+                handler.sendPtyClose(ptyId);
             }
             agentManager.unregisterPtyOutputListener(fullPtyId);
+            agentManager.removePtyAttach(agentId, ptyId);
+            pipelinePtyMap.remove(pipeline.pipelineId());
+        }
+
+        WsMessage response = new WsMessage();
+        response.setType(MessageType.SUCCESS);
+        sendMessage(pipeline, response);
+    }
+
+    /**
+     * 处理远端断开连接请求（只断开远端显示，不关闭本地 PTY）
+     */
+    private void handlePtyDetach(Pipeline pipeline, WsMessage msg) {
+        String fullPtyId = msg.getPtyId();
+        String[] parts = agentManager.parseFullPtyId(fullPtyId);
+        if (parts != null) {
+            String agentId = parts[0];
+            String ptyId = parts[1];
+            ServerTcpHandler handler = agentManager.getAgentHandler(agentId);
+            if (handler != null) {
+                // 只发送 detach，不发送 close
+                handler.sendPtyDetach(ptyId);
+            }
+            agentManager.unregisterPtyOutputListener(fullPtyId);
+            agentManager.unregisterVisibilityDisabledCallback(fullPtyId);
+            agentManager.removePtyAttach(agentId, ptyId);
             pipelinePtyMap.remove(pipeline.pipelineId());
         }
 
@@ -122,34 +151,41 @@ public class RemoteWebSocketHandler implements ReadProcessor<Object> {
         String fullPtyId = msg.getPtyId();
         String[] parts = agentManager.parseFullPtyId(fullPtyId);
         if (parts != null) {
-            ServerTcpHandler handler = agentManager.getAgentHandler(parts[0]);
+            String agentId = parts[0];
+            String ptyId = parts[1];
+            ServerTcpHandler handler = agentManager.getAgentHandler(agentId);
             if (handler != null) {
                 pipelinePtyMap.put(pipeline.pipelineId(), fullPtyId);
 
+                // 记录 attach 状态，用于 Agent 重连后恢复
+                agentManager.recordPtyAttach(agentId, ptyId);
+
                 // 注册输出监听器
-                agentManager.registerPtyOutputListener(fullPtyId, (ptyId, data) -> {
+                agentManager.registerPtyOutputListener(fullPtyId, (ptyIdParam, data) -> {
                     WsMessage outMsg = new WsMessage();
                     outMsg.setType(MessageType.PTY_OUTPUT);
-                    outMsg.setPtyId(ptyId);
+                    outMsg.setPtyId(ptyIdParam);
                     outMsg.setData(data);
                     sendMessage(pipeline, outMsg);
                 });
 
                 // 注册可见性禁用回调
-                agentManager.registerVisibilityDisabledCallback(fullPtyId, (ptyId, reason) -> {
+                agentManager.registerVisibilityDisabledCallback(fullPtyId, (ptyIdParam, reason) -> {
                     // 通知远端客户端终端已不可见
                     WsMessage closeMsg = new WsMessage();
                     closeMsg.setType(MessageType.PTY_VISIBILITY_DISABLED);
-                    closeMsg.setPtyId(ptyId);
+                    closeMsg.setPtyId(ptyIdParam);
                     closeMsg.setData(reason);
                     sendMessage(pipeline, closeMsg);
                     // 清理本地状态
                     pipelinePtyMap.remove(pipeline.pipelineId());
-                    log.info("终端 {} 已关闭远端可见，通知远端客户端断开", ptyId);
+                    // 移除 attach 记录
+                    agentManager.removePtyAttach(agentId, ptyId);
+                    log.info("终端 {} 已关闭远端可见，通知远端客户端断开", ptyIdParam);
                 });
 
                 // 通知 Agent 附加到该终端
-                handler.sendPtyAttach(parts[1]);
+                handler.sendPtyAttach(ptyId);
 
                 WsMessage response = new WsMessage();
                 response.setType(MessageType.SUCCESS);
@@ -170,9 +206,12 @@ public class RemoteWebSocketHandler implements ReadProcessor<Object> {
             agentManager.unregisterVisibilityDisabledCallback(fullPtyId);
             String[] parts = agentManager.parseFullPtyId(fullPtyId);
             if (parts != null) {
-                ServerTcpHandler handler = agentManager.getAgentHandler(parts[0]);
+                String agentId = parts[0];
+                String ptyId = parts[1];
+                agentManager.removePtyAttach(agentId, ptyId);
+                ServerTcpHandler handler = agentManager.getAgentHandler(agentId);
                 if (handler != null) {
-                    handler.sendPtyDetach(parts[1]);
+                    handler.sendPtyDetach(ptyId);
                 }
             }
         }
