@@ -14,6 +14,9 @@ public enum MessageType {
     PTY_SET_REMOTE_VIEWABLE,  // 设置终端可远程查看属性
     PTY_REMOTE_LIST,          // 获取可远程查看的终端列表
     PTY_VISIBILITY_DISABLED,  // 终端远端可见性已禁用
+    LOGIN,                    // 登录请求
+    LOGIN_SUCCESS,            // 登录成功
+    LOGIN_FAILED,             // 登录失败
     ERROR,
     SUCCESS
 }

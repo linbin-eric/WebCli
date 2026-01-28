@@ -29,6 +29,11 @@ public class WebCliConfig
     private int      webPort       = 18080;     // 本地 Web 服务端口
     @PropertyRead("webcli.remoteWebPort")
     private int      remoteWebPort = 18081; // 远端 Web 服务端口 (Server/All 模式)
+    // 远端登录配置
+    @PropertyRead("webcli.remote.username")
+    private String   remoteUsername = "admin";  // 远端登录用户名
+    @PropertyRead("webcli.remote.password")
+    private String   remotePassword = "admin";  // 远端登录密码
 
     public String[] getShellCommand()
     {

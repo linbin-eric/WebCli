@@ -1,0 +1,170 @@
+package cc.jfire.webcli.server;
+
+import cc.jfire.webcli.config.WebCliConfig;
+import lombok.extern.slf4j.Slf4j;
+
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * 登录管理器，负责验证登录和 IP 锁定
+ */
+@Slf4j
+public class LoginManager {
+    private static final int MAX_FAILED_ATTEMPTS = 5;           // 最大失败次数
+    private static final long LOCK_DURATION_MS = 5 * 60 * 1000; // 锁定时长：5分钟
+
+    private final WebCliConfig config;
+    // IP -> 失败记录
+    private final Map<String, FailedAttempt> failedAttempts = new ConcurrentHashMap<>();
+    // 已认证的 Pipeline ID 集合
+    private final Set<String> authenticatedPipelines = ConcurrentHashMap.newKeySet();
+
+    public LoginManager(WebCliConfig config) {
+        this.config = config;
+    }
+
+    /**
+     * 检查 IP 是否被锁定
+     */
+    public boolean isIpLocked(String ip) {
+        FailedAttempt attempt = failedAttempts.get(ip);
+        if (attempt == null) {
+            return false;
+        }
+        // 检查是否已过锁定期
+        if (System.currentTimeMillis() - attempt.firstFailTime > LOCK_DURATION_MS) {
+            failedAttempts.remove(ip);
+            return false;
+        }
+        return attempt.count >= MAX_FAILED_ATTEMPTS;
+    }
+
+    /**
+     * 获取 IP 剩余锁定时间（秒）
+     */
+    public long getRemainingLockTime(String ip) {
+        FailedAttempt attempt = failedAttempts.get(ip);
+        if (attempt == null) {
+            return 0;
+        }
+        long elapsed = System.currentTimeMillis() - attempt.firstFailTime;
+        long remaining = LOCK_DURATION_MS - elapsed;
+        return remaining > 0 ? remaining / 1000 : 0;
+    }
+
+    /**
+     * 验证登录
+     * @param username 用户名
+     * @param passwordHash 前端计算的 MD5(password + salt)
+     * @param salt 前端生成的随机盐
+     * @param ip 客户端 IP
+     * @return 验证结果
+     */
+    public LoginResult verify(String username, String passwordHash, String salt, String ip) {
+        // 检查 IP 是否被锁定
+        if (isIpLocked(ip)) {
+            long remaining = getRemainingLockTime(ip);
+            return new LoginResult(false, "IP 已被锁定，请 " + remaining + " 秒后重试");
+        }
+
+        // 验证用户名
+        if (!config.getRemoteUsername().equals(username)) {
+            recordFailedAttempt(ip);
+            return createFailedResult(ip);
+        }
+
+        // 计算服务端的 MD5(password + salt)
+        String serverHash = md5(config.getRemotePassword() + salt);
+        if (serverHash == null || !serverHash.equalsIgnoreCase(passwordHash)) {
+            recordFailedAttempt(ip);
+            return createFailedResult(ip);
+        }
+
+        // 验证成功，清除失败记录
+        failedAttempts.remove(ip);
+        log.info("用户 {} 从 IP {} 登录成功", username, ip);
+        return new LoginResult(true, "登录成功");
+    }
+
+    /**
+     * 记录失败尝试
+     */
+    private void recordFailedAttempt(String ip) {
+        failedAttempts.compute(ip, (k, v) -> {
+            if (v == null) {
+                return new FailedAttempt(1, System.currentTimeMillis());
+            }
+            // 如果已过期，重新开始计数
+            if (System.currentTimeMillis() - v.firstFailTime > LOCK_DURATION_MS) {
+                return new FailedAttempt(1, System.currentTimeMillis());
+            }
+            return new FailedAttempt(v.count + 1, v.firstFailTime);
+        });
+    }
+
+    /**
+     * 创建失败结果
+     */
+    private LoginResult createFailedResult(String ip) {
+        FailedAttempt attempt = failedAttempts.get(ip);
+        int remaining = MAX_FAILED_ATTEMPTS - (attempt != null ? attempt.count : 0);
+        if (remaining <= 0) {
+            long lockTime = getRemainingLockTime(ip);
+            return new LoginResult(false, "IP 已被锁定，请 " + lockTime + " 秒后重试");
+        }
+        return new LoginResult(false, "用户名或密码错误，还剩 " + remaining + " 次尝试机会");
+    }
+
+    /**
+     * 标记 Pipeline 已认证
+     */
+    public void markAuthenticated(String pipelineId) {
+        authenticatedPipelines.add(pipelineId);
+    }
+
+    /**
+     * 检查 Pipeline 是否已认证
+     */
+    public boolean isAuthenticated(String pipelineId) {
+        return authenticatedPipelines.contains(pipelineId);
+    }
+
+    /**
+     * 移除 Pipeline 认证状态
+     */
+    public void removeAuthentication(String pipelineId) {
+        authenticatedPipelines.remove(pipelineId);
+    }
+
+    /**
+     * 计算 MD5
+     */
+    private String md5(String input) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(input.getBytes());
+            StringBuilder sb = new StringBuilder();
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            log.error("MD5 算法不可用", e);
+            return null;
+        }
+    }
+
+    /**
+     * 失败尝试记录
+     */
+    private record FailedAttempt(int count, long firstFailTime) {}
+
+    /**
+     * 登录结果
+     */
+    public record LoginResult(boolean success, String message) {}
+}

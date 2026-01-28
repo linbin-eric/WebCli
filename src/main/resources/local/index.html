@@ -79,27 +79,6 @@
         .theme-select:hover {
             background: #4c4c4c;
         }
-        .flush-interval {
-            display: flex;
-            align-items: center;
-            gap: 4px;
-            margin-right: 8px;
-            font-size: 12px;
-            color: #888;
-        }
-        .flush-interval input {
-            width: 50px;
-            background: #3c3c3c;
-            color: #fff;
-            border: 1px solid #555;
-            padding: 4px 6px;
-            border-radius: 4px;
-            font-size: 12px;
-            text-align: center;
-        }
-        .flush-interval input:hover {
-            background: #4c4c4c;
-        }
         #terminal-container {
             flex: 1;
             padding: 8px;
@@ -177,11 +156,6 @@
 <div class="toolbar">
     <button id="btn-new">新建终端</button>
     <div class="tabs" id="tabs"></div>
-    <div class="flush-interval">
-        <span>刷新间隔:</span>
-        <input type="number" id="flush-interval" min="0" max="500" value="50">
-        <span>ms</span>
-    </div>
     <select class="theme-select" id="theme-select">
         <option value="dark">深色主题</option>
         <option value="light">浅色主题</option>
@@ -293,13 +267,6 @@
             this.contextMenuPtyId = null;
             this.currentTheme = localStorage.getItem('webcli-theme') || 'dark';
 
-            // 输出缓冲相关
-            this.outputBuffers = new Map();  // ptyId -> 缓冲的文本
-            this.outputTimers = new Map();   // ptyId -> 定时器ID
-            this.outputRafIds = new Map();   // ptyId -> requestAnimationFrame ID
-            this.flushInterval = parseInt(localStorage.getItem('webcli-flush-interval')) || 50;
-            this.lastFlushTime = new Map();  // ptyId -> 上次刷新时间
-
             this.init();
         }
 
@@ -308,7 +275,6 @@
             this.initContextMenu();
             this.initShortcuts();
             this.initThemeSelector();
-            this.initFlushIntervalSelector();
 
             document.getElementById('btn-new').addEventListener('click', () => this.createPty());
             window.addEventListener('resize', () => this.fitTerminal());
@@ -324,17 +290,6 @@
             });
         }
 
-        initFlushIntervalSelector() {
-            const input = document.getElementById('flush-interval');
-            input.value = this.flushInterval;
-            input.addEventListener('change', (e) => {
-                const value = parseInt(e.target.value) || 0;
-                this.flushInterval = Math.max(0, Math.min(500, value));
-                input.value = this.flushInterval;
-                localStorage.setItem('webcli-flush-interval', this.flushInterval.toString());
-            });
-        }
-
         applyTheme() {
             const theme = themes[this.currentTheme];
             // 更新页面背景
@@ -344,60 +299,6 @@
             this.terminals.forEach((term) => {
                 term.options.theme = theme;
             });
-        }
-
-        // 缓冲输出并使用 requestAnimationFrame 刷新
-        bufferOutput(ptyId, text) {
-            const existing = this.outputBuffers.get(ptyId) || '';
-            this.outputBuffers.set(ptyId, existing + text);
-
-            // 如果已经有 RAF 请求，不需要再次请求
-            if (this.outputRafIds.has(ptyId)) {
-                return;
-            }
-
-            const now = performance.now();
-            const lastFlush = this.lastFlushTime.get(ptyId) || 0;
-            const elapsed = now - lastFlush;
-
-            if (this.flushInterval === 0) {
-                // 如果间隔为0，使用 RAF 立即刷新
-                const rafId = requestAnimationFrame(() => {
-                    this.flushOutput(ptyId);
-                });
-                this.outputRafIds.set(ptyId, rafId);
-            } else if (elapsed >= this.flushInterval) {
-                // 如果已经超过间隔时间，使用 RAF 刷新
-                const rafId = requestAnimationFrame(() => {
-                    this.flushOutput(ptyId);
-                });
-                this.outputRafIds.set(ptyId, rafId);
-            } else {
-                // 否则设置定时器等待
-                const timerId = setTimeout(() => {
-                    this.outputTimers.delete(ptyId);
-                    const rafId = requestAnimationFrame(() => {
-                        this.flushOutput(ptyId);
-                    });
-                    this.outputRafIds.set(ptyId, rafId);
-                }, this.flushInterval - elapsed);
-                this.outputTimers.set(ptyId, timerId);
-            }
-        }
-
-        // 刷新缓冲的输出到终端
-        flushOutput(ptyId) {
-            const buffer = this.outputBuffers.get(ptyId);
-            this.outputBuffers.delete(ptyId);
-            this.outputRafIds.delete(ptyId);
-            this.lastFlushTime.set(ptyId, performance.now());
-
-            if (buffer) {
-                const term = this.terminals.get(ptyId);
-                if (term) {
-                    term.write(buffer);
-                }
-            }
         }
 
         initShortcuts() {
@@ -584,7 +485,10 @@
                         const decoded = atob(msg.data);
                         const bytes = Uint8Array.from(decoded, c => c.charCodeAt(0));
                         const text = new TextDecoder('utf-8').decode(bytes);
-                        this.bufferOutput(msg.ptyId, text);
+                        const term = this.terminals.get(msg.ptyId);
+                        if (term) {
+                            term.write(text);
+                        }
                     }
                     break;
                 case MessageType.PTY_LIST:
@@ -660,9 +564,30 @@
             this.fitAddons.set(ptyId, fitAddon);
             this.terminalNames.set(ptyId, name);
 
+            // 用于跟踪 Shift+Enter 是否刚被处理过
+            let skipNextEnterData = false;
+
             term.onData(data => {
+                // 如果刚处理过 Shift+Enter，跳过 onData 产生的回车数据
+                if (skipNextEnterData && (data === '\r' || data === '\n')) {
+                    skipNextEnterData = false;
+                    return;
+                }
+                skipNextEnterData = false;
                 const encoded = btoa(unescape(encodeURIComponent(data)));
                 this.send({ type: MessageType.PTY_INPUT, ptyId, data: encoded });
+            });
+
+            // 自定义按键处理：Shift+Enter 发送与 Alt+Enter 相同的转义序列
+            term.attachCustomKeyEventHandler((ev) => {
+                if (ev.type === 'keydown' && ev.key === 'Enter' && ev.shiftKey && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+                    // Shift+Enter: 发送 ESC + CR (与 Alt+Enter 相同的序列)
+                    const encoded = btoa('\x1b\r');
+                    this.send({ type: MessageType.PTY_INPUT, ptyId, data: encoded });
+                    skipNextEnterData = true; // 标记跳过下一个 onData 中的回车
+                    return false; // 阻止默认处理
+                }
+                return true; // 其他按键正常处理
             });
 
             term.onResize(({ cols, rows }) => {
@@ -733,20 +658,6 @@
             this.fitAddons.delete(ptyId);
             this.terminalNames.delete(ptyId);
             this.terminalRemoteViewable.delete(ptyId);
-
-            // 清理输出缓冲
-            const timerId = this.outputTimers.get(ptyId);
-            if (timerId) {
-                clearTimeout(timerId);
-                this.outputTimers.delete(ptyId);
-            }
-            const rafId = this.outputRafIds.get(ptyId);
-            if (rafId) {
-                cancelAnimationFrame(rafId);
-                this.outputRafIds.delete(ptyId);
-            }
-            this.outputBuffers.delete(ptyId);
-            this.lastFlushTime.delete(ptyId);
 
             document.querySelector(`.tab[data-pty-id="${ptyId}"]`)?.remove();
 

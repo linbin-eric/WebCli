@@ -6,6 +6,7 @@ import cc.jfire.jnet.common.api.ReadProcessor;
 import cc.jfire.jnet.common.api.ReadProcessorNode;
 import cc.jfire.jnet.common.buffer.buffer.IoBuffer;
 import cc.jfire.jnet.extend.websocket.dto.WebSocketFrame;
+import cc.jfire.webcli.config.WebCliConfig;
 import cc.jfire.webcli.protocol.MessageType;
 import cc.jfire.webcli.protocol.PtyInfo;
 import cc.jfire.webcli.protocol.WsMessage;
@@ -18,10 +19,12 @@ import java.util.concurrent.ConcurrentHashMap;
 @Slf4j
 public class RemoteWebSocketHandler implements ReadProcessor<Object> {
     private final AgentManager agentManager;
+    private final LoginManager loginManager;
     private final ConcurrentHashMap<String, String> pipelinePtyMap = new ConcurrentHashMap<>();
 
-    public RemoteWebSocketHandler(AgentManager agentManager) {
+    public RemoteWebSocketHandler(AgentManager agentManager, WebCliConfig config) {
         this.agentManager = agentManager;
+        this.loginManager = new LoginManager(config);
     }
 
     @Override
@@ -51,6 +54,20 @@ public class RemoteWebSocketHandler implements ReadProcessor<Object> {
     private void handleMessage(Pipeline pipeline, String text) {
         try {
             WsMessage msg = Dson.fromString(WsMessage.class, text);
+            String pipelineId = pipeline.pipelineId();
+
+            // 登录消息特殊处理
+            if (msg.getType() == MessageType.LOGIN) {
+                handleLogin(pipeline, msg);
+                return;
+            }
+
+            // 其他消息需要先验证是否已登录
+            if (!loginManager.isAuthenticated(pipelineId)) {
+                sendLoginRequired(pipeline);
+                return;
+            }
+
             switch (msg.getType()) {
                 case PTY_REMOTE_LIST -> handlePtyRemoteList(pipeline);
                 case PTY_INPUT -> handlePtyInput(pipeline, msg);
@@ -64,6 +81,50 @@ public class RemoteWebSocketHandler implements ReadProcessor<Object> {
             log.error("处理消息失败", e);
             sendError(pipeline, e.getMessage());
         }
+    }
+
+    /**
+     * 处理登录请求
+     */
+    private void handleLogin(Pipeline pipeline, WsMessage msg) {
+        String clientIp = getClientIp(pipeline);
+        String pipelineId = pipeline.pipelineId();
+
+        LoginManager.LoginResult result = loginManager.verify(
+            msg.getUsername(),
+            msg.getPasswordHash(),
+            msg.getSalt(),
+            clientIp
+        );
+
+        WsMessage response = new WsMessage();
+        if (result.success()) {
+            loginManager.markAuthenticated(pipelineId);
+            response.setType(MessageType.LOGIN_SUCCESS);
+            response.setData(result.message());
+        } else {
+            response.setType(MessageType.LOGIN_FAILED);
+            response.setData(result.message());
+        }
+        sendMessage(pipeline, response);
+    }
+
+    /**
+     * 发送需要登录的消息
+     */
+    private void sendLoginRequired(Pipeline pipeline) {
+        WsMessage msg = new WsMessage();
+        msg.setType(MessageType.LOGIN_FAILED);
+        msg.setData("请先登录");
+        sendMessage(pipeline, msg);
+    }
+
+    /**
+     * 获取客户端 IP 地址
+     */
+    private String getClientIp(Pipeline pipeline) {
+        String address = pipeline.getRemoteAddressWithoutException();
+        return address != null ? address : "unknown";
     }
 
     private void handlePtyRemoteList(Pipeline pipeline) {
@@ -200,7 +261,11 @@ public class RemoteWebSocketHandler implements ReadProcessor<Object> {
     }
 
     private void handleClose(Pipeline pipeline) {
-        String fullPtyId = pipelinePtyMap.remove(pipeline.pipelineId());
+        String pipelineId = pipeline.pipelineId();
+        // 清理登录状态
+        loginManager.removeAuthentication(pipelineId);
+
+        String fullPtyId = pipelinePtyMap.remove(pipelineId);
         if (fullPtyId != null) {
             agentManager.unregisterPtyOutputListener(fullPtyId);
             agentManager.unregisterVisibilityDisabledCallback(fullPtyId);

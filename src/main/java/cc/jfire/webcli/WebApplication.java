@@ -153,7 +153,7 @@ public class WebApplication
 
     private void startRemoteWebServer()
     {
-        RemoteWebSocketHandler   wsHandler     = new RemoteWebSocketHandler(agentManager);
+        RemoteWebSocketHandler   wsHandler     = new RemoteWebSocketHandler(agentManager, config);
         ApplicationContext       context       = ApplicationContext.boot(WebApplication.class);
         int                      remoteWebPort = config.getRemoteWebPort();
         ChannelConfig            webConfig     = new ChannelConfig().setIp("0.0.0.0").setPort(remoteWebPort).setChannelGroup(ChannelConfig.DEFAULT_CHANNEL_GROUP);

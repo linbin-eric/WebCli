@@ -11,4 +11,8 @@ public class WsMessage {
     private Integer cols;
     private Integer rows;
     private Boolean remoteViewable;
+    // 登录相关字段
+    private String username;
+    private String passwordHash;  // MD5(password + salt)
+    private String salt;          // 前端生成的随机盐
 }
