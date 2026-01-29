@@ -33,17 +33,20 @@ public class PtyManager
 
     public PtyInstance create(String name) throws IOException
     {
-        return create(defaultCommand, name, 120, 40);
+        // 使用固定大尺寸，忽略客户端尺寸参数
+        return create(defaultCommand, name, 200, 100);
     }
 
     public PtyInstance create(String name, int cols, int rows) throws IOException
     {
-        return create(defaultCommand, name, cols, rows);
+        // 使用固定大尺寸，忽略客户端尺寸参数
+        return create(defaultCommand, name, 200, 100);
     }
 
     public PtyInstance create(String[] command, String name) throws IOException
     {
-        return create(command, name, 120, 40);
+        // 使用固定大尺寸
+        return create(command, name, 200, 100);
     }
 
     public PtyInstance create(String[] command, String name, int cols, int rows) throws IOException

@@ -36,8 +36,12 @@ public class PtyInstance {
     private volatile boolean remoteViewable = false;
     private Thread readThread;
 
+    // 固定的 PTY 尺寸，足够大以适应大多数屏幕
+    private static final int FIXED_COLS = 200;
+    private static final int FIXED_ROWS = 100;
+
     public PtyInstance(String[] command, String name, String workingDirectory) throws IOException {
-        this(command, name, workingDirectory, 120, 40);
+        this(command, name, workingDirectory, FIXED_COLS, FIXED_ROWS);
     }
 
     public PtyInstance(String[] command, String name, String workingDirectory, int cols, int rows) throws IOException {
@@ -145,7 +149,9 @@ public class PtyInstance {
     }
 
     public void resize(int cols, int rows) {
-        process.setWinSize(new WinSize(cols, rows));
+        // 固定大尺寸方案：忽略客户端的 resize 请求
+        // PTY 保持固定尺寸，每个客户端根据自己的窗口大小显示
+        log.debug("忽略 resize 请求 ({}x{})，PTY 保持固定尺寸 ({}x{})", cols, rows, FIXED_COLS, FIXED_ROWS);
     }
 
     public void close() {
