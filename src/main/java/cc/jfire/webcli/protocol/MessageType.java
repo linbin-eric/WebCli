@@ -17,6 +17,9 @@ public enum MessageType {
     LOGIN,                    // 登录请求
     LOGIN_SUCCESS,            // 登录成功
     LOGIN_FAILED,             // 登录失败
+    AUTH,                     // WebSocket token 认证请求
+    AUTH_SUCCESS,             // WebSocket token 认证成功
+    AUTH_FAILED,              // WebSocket token 认证失败
     ERROR,
     SUCCESS
 }

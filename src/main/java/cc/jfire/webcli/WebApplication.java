@@ -1,13 +1,14 @@
 package cc.jfire.webcli;
 
-import cc.jfire.baseutil.RuntimeJVM;
 import cc.jfire.baseutil.Resource;
+import cc.jfire.baseutil.RuntimeJVM;
 import cc.jfire.boot.http.HttpAppServer;
 import cc.jfire.jfire.core.ApplicationContext;
+import cc.jfire.jfire.core.AwareContextInited;
 import cc.jfire.jfire.core.prepare.annotation.ComponentScan;
 import cc.jfire.jfire.core.prepare.annotation.EnableAutoConfiguration;
-import cc.jfire.jfire.core.prepare.annotation.configuration.Configuration;
 import cc.jfire.jfire.core.prepare.annotation.PropertyPath;
+import cc.jfire.jfire.core.prepare.annotation.configuration.Configuration;
 import cc.jfire.jnet.common.coder.ValidatedLengthFrameDecoder;
 import cc.jfire.jnet.common.coder.ValidatedLengthFrameEncoder;
 import cc.jfire.jnet.common.util.ChannelConfig;
@@ -16,6 +17,7 @@ import cc.jfire.webcli.agent.AgentTcpClient;
 import cc.jfire.webcli.config.WebCliConfig;
 import cc.jfire.webcli.pty.PtyManager;
 import cc.jfire.webcli.server.AgentManager;
+import cc.jfire.webcli.server.LoginManager;
 import cc.jfire.webcli.server.RemoteWebSocketHandler;
 import cc.jfire.webcli.server.ServerTcpHandler;
 import cc.jfire.webcli.web.WebSocketHandler;
@@ -26,72 +28,45 @@ import lombok.extern.slf4j.Slf4j;
 @Configuration
 @PropertyPath("classpath:application.yml")
 @ComponentScan("cc.jfire.webcli")
-public class WebApplication
+public class WebApplication implements AwareContextInited
 {
-    /** 协议魔法值，用于帧验证 */
-    private static final int PROTOCOL_MAGIC = 0x57454243; // "WEBC" in hex
-
+    /**
+     * 协议魔法值，用于帧验证
+     */
+    private static final int            PROTOCOL_MAGIC = 0x57454243; // "WEBC" in hex
     @Resource
     private              WebCliConfig   config;
+    @Resource
+    private              PtyManager     ptyManager;
+    @Resource
+    private              AgentManager   agentManager;
+    @Resource
+    private              LoginManager   loginManager;
     private              AioServer      localWebServer;
     private              AioServer      remoteWebServer;
     private              AioServer      tcpServer;
-    private              PtyManager     ptyManager;
     private              AgentTcpClient agentTcpClient;
-    private              AgentManager   agentManager;
 
-    public void start()
+    public void start(ApplicationContext context)
     {
-        // 如果配置中 shell 为空，则应用默认配置
-        applyDefaultsIfNeeded();
-
         if (config.isAllMode())
         {
-            startAllMode();
+            startAllMode(context);
         }
         else if (config.isServerMode())
         {
-            startServerMode();
+            startServerMode(context);
         }
         else
         {
-            startAgentMode();
+            startLocalMode(context);
         }
     }
 
-    private void applyDefaultsIfNeeded()
+    private void startLocalMode(ApplicationContext context)
     {
-        if (config.getShell() == null || config.getShell().isBlank())
-        {
-            String os = System.getProperty("os.name").toLowerCase();
-            if (os.contains("win"))
-            {
-                config.setShell("cmd.exe");
-                config.setShellArgs(null);
-            }
-            else if (os.contains("mac"))
-            {
-                config.setShell("/bin/zsh");
-                config.setShellArgs(new String[]{"-i", "-l"});
-            }
-            else
-            {
-                config.setShell("/bin/bash");
-                config.setShellArgs(new String[]{"-i", "-l"});
-            }
-        }
-        if (config.getWorkingDirectory() == null || config.getWorkingDirectory().isBlank())
-        {
-            config.setWorkingDirectory(System.getProperty("user.home"));
-        }
-    }
-
-    private void startAgentMode()
-    {
-        // 启动本地 PTY 管理器和 Web 服务
-        this.ptyManager = new PtyManager(config);
+        // 启动本地 Web 服务
         WebSocketHandler         wsHandler     = new WebSocketHandler(ptyManager);
-        ApplicationContext       context       = ApplicationContext.boot(WebApplication.class);
         ChannelConfig            channelConfig = new ChannelConfig().setIp("127.0.0.1").setPort(config.getWebPort()).setChannelGroup(ChannelConfig.DEFAULT_CHANNEL_GROUP);
         HttpAppServer.StartParam startParam    = new HttpAppServer.StartParam().setChannelConfig(channelConfig).setContext(context).setWebDir("local").setWebSocketProcessor(wsHandler);
         localWebServer = HttpAppServer.start(startParam);
@@ -106,37 +81,20 @@ public class WebApplication
         }
     }
 
-    private void startServerMode()
+    private void startServerMode(ApplicationContext context)
     {
-        // 启动 Agent 管理器
-        this.agentManager = new AgentManager();
         // 启动 TCP 服务端，接受 Agent 连接
         startTcpServer();
         // 启动远端 Web 服务
-        startRemoteWebServer();
+        startRemoteWebServer(context);
     }
 
-    private void startAllMode()
+    private void startAllMode(ApplicationContext context)
     {
         // 同时启动 Agent 和 Server
         log.info("启动 All 模式：同时运行 Agent 和 Server");
-        // 1. 启动 Server 部分
-        this.agentManager = new AgentManager();
-        startTcpServer();
-        startRemoteWebServer();
-        // 2. 启动 Agent 部分（本地 PTY 和 Web）
-        this.ptyManager = new PtyManager(config);
-        WebSocketHandler         wsHandler     = new WebSocketHandler(ptyManager);
-        ApplicationContext       context       = ApplicationContext.boot(WebApplication.class);
-        ChannelConfig            channelConfig = new ChannelConfig().setIp("127.0.0.1").setPort(config.getWebPort()).setChannelGroup(ChannelConfig.DEFAULT_CHANNEL_GROUP);
-        HttpAppServer.StartParam startParam    = new HttpAppServer.StartParam().setChannelConfig(channelConfig).setContext(context).setWebDir("local").setWebSocketProcessor(wsHandler);
-        localWebServer = HttpAppServer.start(startParam);
-        log.info("本地 Web 服务已启动，监听地址: {}:{}", channelConfig.getIp(), config.getWebPort());
-        log.info("请访问本地终端: http://127.0.0.1:{}/", config.getWebPort());
-        // 3. Agent 连接到本地 Server
-        agentTcpClient = new AgentTcpClient(config, ptyManager);
-        agentTcpClient.connect();
-        log.info("Agent 正在连接本地 Server: {}:{}", config.getServerHost(), config.getServerPort());
+        startServerMode(context);
+        startLocalMode(context);
     }
 
     private void startTcpServer()
@@ -151,10 +109,9 @@ public class WebApplication
         log.info("TCP 服务已启动，监听端口: {}", config.getTcpPort());
     }
 
-    private void startRemoteWebServer()
+    private void startRemoteWebServer(ApplicationContext context)
     {
-        RemoteWebSocketHandler   wsHandler     = new RemoteWebSocketHandler(agentManager, config);
-        ApplicationContext       context       = ApplicationContext.boot(WebApplication.class);
+        RemoteWebSocketHandler   wsHandler     = new RemoteWebSocketHandler(agentManager, loginManager);
         int                      remoteWebPort = config.getRemoteWebPort();
         ChannelConfig            webConfig     = new ChannelConfig().setIp("0.0.0.0").setPort(remoteWebPort).setChannelGroup(ChannelConfig.DEFAULT_CHANNEL_GROUP);
         HttpAppServer.StartParam startParam    = new HttpAppServer.StartParam().setChannelConfig(webConfig).setContext(context).setWebDir("remote").setWebSocketProcessor(wsHandler);
@@ -194,6 +151,11 @@ public class WebApplication
         ApplicationContext context = ApplicationContext.boot(WebApplication.class);
         WebApplication     app     = context.getBean(WebApplication.class);
         Runtime.getRuntime().addShutdownHook(new Thread(app::shutdown));
-        app.start();
+    }
+
+    @Override
+    public void aware(ApplicationContext context)
+    {
+        start(context);
     }
 }

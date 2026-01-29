@@ -7,7 +7,6 @@ import cc.jfire.jnet.common.api.ReadProcessorNode;
 import cc.jfire.jnet.common.buffer.buffer.IoBuffer;
 import cc.jfire.jnet.extend.websocket.dto.WebSocketFrame;
 import cc.jfire.webcli.protocol.MessageType;
-import cc.jfire.webcli.protocol.PtyInfo;
 import cc.jfire.webcli.protocol.WsMessage;
 import cc.jfire.webcli.pty.PtyInstance;
 import cc.jfire.webcli.pty.PtyManager;
@@ -16,7 +15,6 @@ import lombok.extern.slf4j.Slf4j;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
-import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
@@ -73,16 +71,11 @@ public class WebSocketHandler implements ReadProcessor<Object>
             WsMessage msg = Dson.fromString(WsMessage.class, text);
             switch (msg.getType())
             {
-                case PTY_CREATE -> handlePtyCreate(pipeline, msg);
                 case PTY_INPUT -> handlePtyInput(pipeline, msg);
                 case PTY_RESIZE -> handlePtyResize(pipeline, msg);
-                case PTY_CLOSE -> handlePtyClose(pipeline, msg);
-                case PTY_LIST -> handlePtyList(pipeline);
                 case PTY_SWITCH -> handlePtySwitch(pipeline, msg);
                 case PTY_ATTACH -> handlePtyAttach(pipeline, msg);
-                case PTY_RENAME -> handlePtyRename(pipeline, msg);
-                case PTY_SET_REMOTE_VIEWABLE -> handleSetRemoteViewable(pipeline, msg);
-                default -> log.warn("未知消息类型: {}", msg.getType());
+                default -> log.warn("未知或已迁移到 HTTP 的消息类型: {}", msg.getType());
             }
         }
         catch (Exception e)
@@ -90,35 +83,6 @@ public class WebSocketHandler implements ReadProcessor<Object>
             log.error("处理消息失败", e);
             sendError(pipeline, e.getMessage());
         }
-    }
-
-    private void handlePtyCreate(Pipeline pipeline, WsMessage msg) throws IOException
-    {
-        String name = msg.getName();
-        int cols = msg.getCols() != null ? msg.getCols() : 120;
-        int rows = msg.getRows() != null ? msg.getRows() : 40;
-        PtyInstance pty = ptyManager.create(name, cols, rows);
-        pipelinePtyMap.put(pipeline.pipelineId(), pty.getId());
-
-        // 创建输出监听器
-        Consumer<String> listener = output -> {
-            WsMessage outMsg = new WsMessage();
-            outMsg.setType(MessageType.PTY_OUTPUT);
-            outMsg.setPtyId(pty.getId());
-            outMsg.setData(Base64.getEncoder().encodeToString(output.getBytes(StandardCharsets.UTF_8)));
-            sendMessage(pipeline, outMsg);
-        };
-        // 保存监听器引用
-        pipelineOutputListeners.put(pipeline.pipelineId(), listener);
-        // 注册到 PtyInstance
-        pty.addOutputListener(listener);
-
-        pty.startReading();
-        WsMessage response = new WsMessage();
-        response.setType(MessageType.SUCCESS);
-        response.setPtyId(pty.getId());
-        response.setName(pty.getName());
-        sendMessage(pipeline, response);
     }
 
     private void handlePtyInput(Pipeline pipeline, WsMessage msg) throws IOException
@@ -141,40 +105,6 @@ public class WebSocketHandler implements ReadProcessor<Object>
         {
             pty.resize(msg.getCols(), msg.getRows());
         }
-    }
-
-    private void handlePtyClose(Pipeline pipeline, WsMessage msg)
-    {
-        String ptyId = msg.getPtyId() != null ? msg.getPtyId() : pipelinePtyMap.get(pipeline.pipelineId());
-        if (ptyId != null)
-        {
-            // 移除监听器
-            Consumer<String> listener = pipelineOutputListeners.remove(pipeline.pipelineId());
-            if (listener != null)
-            {
-                PtyInstance pty = ptyManager.get(ptyId);
-                if (pty != null)
-                {
-                    pty.removeOutputListener(listener);
-                }
-            }
-            ptyManager.remove(ptyId);
-            pipelinePtyMap.remove(pipeline.pipelineId());
-            WsMessage response = new WsMessage();
-            response.setType(MessageType.SUCCESS);
-            sendMessage(pipeline, response);
-        }
-    }
-
-    private void handlePtyList(Pipeline pipeline)
-    {
-        List<PtyInfo> list     = ptyManager.getAll().stream()
-                .map(pty -> new PtyInfo(pty.getId(), pty.getName(), pty.isAlive(), pty.isRemoteViewable()))
-                .toList();
-        WsMessage     response = new WsMessage();
-        response.setType(MessageType.PTY_LIST);
-        response.setData(Dson.toJson(list));
-        sendMessage(pipeline, response);
     }
 
     private void handlePtySwitch(Pipeline pipeline, WsMessage msg)
@@ -259,43 +189,6 @@ public class WebSocketHandler implements ReadProcessor<Object>
             {
                 pty.removeOutputListener(listener);
             }
-        }
-    }
-
-    private void handlePtyRename(Pipeline pipeline, WsMessage msg)
-    {
-        PtyInstance pty = ptyManager.get(msg.getPtyId());
-        if (pty != null)
-        {
-            pty.setName(msg.getName());
-            WsMessage response = new WsMessage();
-            response.setType(MessageType.SUCCESS);
-            response.setPtyId(msg.getPtyId());
-            response.setName(pty.getName());
-            sendMessage(pipeline, response);
-        }
-        else
-        {
-            sendError(pipeline, "PTY 不存在: " + msg.getPtyId());
-        }
-    }
-
-    private void handleSetRemoteViewable(Pipeline pipeline, WsMessage msg)
-    {
-        PtyInstance pty = ptyManager.get(msg.getPtyId());
-        if (pty != null)
-        {
-            pty.setRemoteViewable(msg.getRemoteViewable() != null && msg.getRemoteViewable());
-            WsMessage response = new WsMessage();
-            response.setType(MessageType.SUCCESS);
-            response.setPtyId(msg.getPtyId());
-            response.setRemoteViewable(pty.isRemoteViewable());
-            sendMessage(pipeline, response);
-            log.info("设置终端 {} 远程可见: {}", msg.getPtyId(), pty.isRemoteViewable());
-        }
-        else
-        {
-            sendError(pipeline, "PTY 不存在: " + msg.getPtyId());
         }
     }
 

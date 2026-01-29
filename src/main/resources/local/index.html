@@ -191,13 +191,8 @@
         PTY_OUTPUT: 'PTY_OUTPUT',
         PTY_INPUT: 'PTY_INPUT',
         PTY_RESIZE: 'PTY_RESIZE',
-        PTY_CREATE: 'PTY_CREATE',
-        PTY_CLOSE: 'PTY_CLOSE',
-        PTY_LIST: 'PTY_LIST',
         PTY_SWITCH: 'PTY_SWITCH',
         PTY_ATTACH: 'PTY_ATTACH',
-        PTY_RENAME: 'PTY_RENAME',
-        PTY_SET_REMOTE_VIEWABLE: 'PTY_SET_REMOTE_VIEWABLE',
         ERROR: 'ERROR',
         SUCCESS: 'SUCCESS'
     };
@@ -433,14 +428,44 @@
         }
 
         renamePty(ptyId, newName) {
-            this.send({ type: MessageType.PTY_RENAME, ptyId, name: newName });
-            this.terminalNames.set(ptyId, newName);
-            this.updateTab(ptyId);
+            fetch(`/api/terminal/${ptyId}/name`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: newName })
+            })
+            .then(response => response.json())
+            .then(result => {
+                if (result.success && result.data) {
+                    this.terminalNames.set(ptyId, result.data.name);
+                    this.updateTab(ptyId);
+                } else {
+                    console.error('重命名失败:', result.message);
+                    alert('重命名失败: ' + result.message);
+                }
+            })
+            .catch(e => {
+                console.error('重命名失败:', e);
+                alert('重命名失败');
+            });
         }
 
         toggleRemoteViewable(ptyId) {
             const current = this.terminalRemoteViewable.get(ptyId) || false;
-            this.send({ type: MessageType.PTY_SET_REMOTE_VIEWABLE, ptyId, remoteViewable: !current });
+            fetch(`/api/terminal/${ptyId}/visibility`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ remoteViewable: !current })
+            })
+            .then(response => response.json())
+            .then(result => {
+                if (result.success && result.data) {
+                    this.terminalRemoteViewable.set(ptyId, result.data.remoteViewable);
+                    this.updateTab(ptyId);
+                } else {
+                    console.error('设置远程可见性失败:', result.message);
+                }
+            })
+            .catch(e => console.error('设置远程可见性失败:', e));
         }
 
         updateTab(ptyId) {
@@ -463,7 +488,7 @@
 
             this.ws.onopen = () => {
                 this.updateStatus(true);
-                this.send({ type: MessageType.PTY_LIST });
+                this.loadTerminalList();
             };
 
             this.ws.onmessage = (e) => {
@@ -476,6 +501,22 @@
             };
 
             this.ws.onerror = (e) => console.error('WebSocket error:', e);
+        }
+
+        async loadTerminalList() {
+            try {
+                const response = await fetch('/api/terminals');
+                const result = await response.json();
+                if (result.success && result.data) {
+                    this.handlePtyList(result.data);
+                } else {
+                    console.error('获取终端列表失败:', result.message);
+                    this.createPty();
+                }
+            } catch (e) {
+                console.error('获取终端列表失败:', e);
+                this.createPty();
+            }
         }
 
         handleMessage(msg) {
@@ -491,18 +532,8 @@
                         }
                     }
                     break;
-                case MessageType.PTY_LIST:
-                    this.handlePtyList(msg.data);
-                    break;
                 case MessageType.SUCCESS:
-                    if (msg.ptyId && !this.terminals.has(msg.ptyId)) {
-                        this.addTerminal(msg.ptyId, msg.name);
-                        this.updateNextTerminalNumber();
-                    }
-                    if (msg.remoteViewable !== undefined && msg.ptyId) {
-                        this.terminalRemoteViewable.set(msg.ptyId, msg.remoteViewable);
-                        this.updateTab(msg.ptyId);
-                    }
+                    // WebSocket 只处理 attach 成功的响应
                     break;
                 case MessageType.ERROR:
                     console.error('Server error:', msg.data);
@@ -510,8 +541,7 @@
             }
         }
 
-        handlePtyList(data) {
-            const list = JSON.parse(data);
+        handlePtyList(list) {
             if (list && list.length > 0) {
                 list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
                 list.forEach((ptyInfo, index) => {
@@ -542,9 +572,31 @@
             this.send({ type: MessageType.PTY_ATTACH, ptyId });
         }
 
-        createPty() {
+        async createPty() {
             const name = `终端 ${this.nextTerminalNumber++}`;
-            this.send({ type: MessageType.PTY_CREATE, name });
+            try {
+                const response = await fetch('/api/terminal', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name })
+                });
+                const result = await response.json();
+                if (result.success && result.data) {
+                    const ptyInfo = result.data;
+                    this.terminalRemoteViewable.set(ptyInfo.id, ptyInfo.remoteViewable || false);
+                    this.addTerminal(ptyInfo.id, ptyInfo.name, true);
+                    this.send({ type: MessageType.PTY_ATTACH, ptyId: ptyInfo.id });
+                    this.updateNextTerminalNumber();
+                } else {
+                    console.error('创建终端失败:', result.message);
+                    alert('创建终端失败: ' + result.message);
+                    this.nextTerminalNumber--;
+                }
+            } catch (e) {
+                console.error('创建终端失败:', e);
+                alert('创建终端失败');
+                this.nextTerminalNumber--;
+            }
         }
 
         addTerminal(ptyId, name, switchTo = true) {
@@ -652,7 +704,15 @@
         }
 
         closePty(ptyId) {
-            this.send({ type: MessageType.PTY_CLOSE, ptyId });
+            fetch(`/api/terminal/${ptyId}`, { method: 'DELETE' })
+                .then(response => response.json())
+                .then(result => {
+                    if (!result.success) {
+                        console.error('关闭终端失败:', result.message);
+                    }
+                })
+                .catch(e => console.error('关闭终端失败:', e));
+
             this.terminals.get(ptyId)?.dispose();
             this.terminals.delete(ptyId);
             this.fitAddons.delete(ptyId);

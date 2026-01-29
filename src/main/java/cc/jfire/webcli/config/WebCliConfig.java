@@ -1,5 +1,6 @@
 package cc.jfire.webcli.config;
 
+import cc.jfire.baseutil.PostConstruct;
 import cc.jfire.baseutil.Resource;
 import cc.jfire.jfire.core.inject.notated.PropertyRead;
 import lombok.Data;
@@ -14,6 +15,34 @@ public class WebCliConfig
     private String[] shellArgs;
     @PropertyRead("webcli.shell.directory")
     private String   workingDirectory;
+
+    @PostConstruct
+    public void init()
+    {
+        if (shell == null || shell.isBlank())
+        {
+            String os = System.getProperty("os.name").toLowerCase();
+            if (os.contains("win"))
+            {
+                shell = "cmd.exe";
+                shellArgs = null;
+            }
+            else if (os.contains("mac"))
+            {
+                shell = "/bin/zsh";
+                shellArgs = new String[]{"-i", "-l"};
+            }
+            else
+            {
+                shell = "/bin/bash";
+                shellArgs = new String[]{"-i", "-l"};
+            }
+        }
+        if (workingDirectory == null || workingDirectory.isBlank())
+        {
+            workingDirectory = System.getProperty("user.home");
+        }
+    }
     // P1 阶段新增配置
     @PropertyRead("webcli.mode")
     private String   mode          = "all";      // 运行模式: agent、server 或 all
@@ -64,28 +93,5 @@ public class WebCliConfig
     public boolean isAllMode()
     {
         return "all".equalsIgnoreCase(mode);
-    }
-
-    public static WebCliConfig defaultConfig()
-    {
-        WebCliConfig config = new WebCliConfig();
-        config.setWorkingDirectory(System.getProperty("user.home"));
-        String os = System.getProperty("os.name").toLowerCase();
-        if (os.contains("win"))
-        {
-            config.setShell("cmd.exe");
-            config.setShellArgs(null);
-        }
-        else if (os.contains("mac"))
-        {
-            config.setShell("/bin/zsh");
-            config.setShellArgs(new String[]{"-i", "-l"});
-        }
-        else
-        {
-            config.setShell("/bin/bash");
-            config.setShellArgs(new String[]{"-i", "-l"});
-        }
-        return config;
     }
 }

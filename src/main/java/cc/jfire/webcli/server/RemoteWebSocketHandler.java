@@ -6,14 +6,11 @@ import cc.jfire.jnet.common.api.ReadProcessor;
 import cc.jfire.jnet.common.api.ReadProcessorNode;
 import cc.jfire.jnet.common.buffer.buffer.IoBuffer;
 import cc.jfire.jnet.extend.websocket.dto.WebSocketFrame;
-import cc.jfire.webcli.config.WebCliConfig;
 import cc.jfire.webcli.protocol.MessageType;
-import cc.jfire.webcli.protocol.PtyInfo;
 import cc.jfire.webcli.protocol.WsMessage;
 import lombok.extern.slf4j.Slf4j;
 
 import java.nio.charset.StandardCharsets;
-import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
@@ -22,9 +19,9 @@ public class RemoteWebSocketHandler implements ReadProcessor<Object> {
     private final LoginManager loginManager;
     private final ConcurrentHashMap<String, String> pipelinePtyMap = new ConcurrentHashMap<>();
 
-    public RemoteWebSocketHandler(AgentManager agentManager, WebCliConfig config) {
+    public RemoteWebSocketHandler(AgentManager agentManager, LoginManager loginManager) {
         this.agentManager = agentManager;
-        this.loginManager = new LoginManager(config);
+        this.loginManager = loginManager;
     }
 
     @Override
@@ -56,9 +53,9 @@ public class RemoteWebSocketHandler implements ReadProcessor<Object> {
             WsMessage msg = Dson.fromString(WsMessage.class, text);
             String pipelineId = pipeline.pipelineId();
 
-            // 登录消息特殊处理
-            if (msg.getType() == MessageType.LOGIN) {
-                handleLogin(pipeline, msg);
+            // AUTH 消息用于通过 token 认证 WebSocket 连接
+            if (msg.getType() == MessageType.AUTH) {
+                handleAuth(pipeline, msg);
                 return;
             }
 
@@ -69,13 +66,11 @@ public class RemoteWebSocketHandler implements ReadProcessor<Object> {
             }
 
             switch (msg.getType()) {
-                case PTY_REMOTE_LIST -> handlePtyRemoteList(pipeline);
                 case PTY_INPUT -> handlePtyInput(pipeline, msg);
                 case PTY_RESIZE -> handlePtyResize(pipeline, msg);
-                case PTY_CLOSE -> handlePtyClose(pipeline, msg);
                 case PTY_DETACH -> handlePtyDetach(pipeline, msg);
                 case PTY_ATTACH -> handlePtyAttach(pipeline, msg);
-                default -> log.warn("远端 Web 不支持的消息类型: {}", msg.getType());
+                default -> log.warn("远端 Web 不支持或已迁移到 HTTP 的消息类型: {}", msg.getType());
             }
         } catch (Exception e) {
             log.error("处理消息失败", e);
@@ -84,29 +79,25 @@ public class RemoteWebSocketHandler implements ReadProcessor<Object> {
     }
 
     /**
-     * 处理登录请求
+     * 处理 token 认证请求
      */
-    private void handleLogin(Pipeline pipeline, WsMessage msg) {
-        String clientIp = getClientIp(pipeline);
+    private void handleAuth(Pipeline pipeline, WsMessage msg) {
+        String token = msg.getData();
         String pipelineId = pipeline.pipelineId();
 
-        LoginManager.LoginResult result = loginManager.verify(
-            msg.getUsername(),
-            msg.getPasswordHash(),
-            msg.getSalt(),
-            clientIp
-        );
-
-        WsMessage response = new WsMessage();
-        if (result.success()) {
-            loginManager.markAuthenticated(pipelineId);
-            response.setType(MessageType.LOGIN_SUCCESS);
-            response.setData(result.message());
+        if (loginManager.authenticateByToken(pipelineId, token)) {
+            WsMessage response = new WsMessage();
+            response.setType(MessageType.AUTH_SUCCESS);
+            response.setData("认证成功");
+            sendMessage(pipeline, response);
+            log.info("WebSocket 连接通过 token 认证成功: {}", pipelineId);
         } else {
-            response.setType(MessageType.LOGIN_FAILED);
-            response.setData(result.message());
+            WsMessage response = new WsMessage();
+            response.setType(MessageType.AUTH_FAILED);
+            response.setData("token 无效或已过期");
+            sendMessage(pipeline, response);
+            log.warn("WebSocket 连接 token 认证失败: {}", pipelineId);
         }
-        sendMessage(pipeline, response);
     }
 
     /**
@@ -114,31 +105,9 @@ public class RemoteWebSocketHandler implements ReadProcessor<Object> {
      */
     private void sendLoginRequired(Pipeline pipeline) {
         WsMessage msg = new WsMessage();
-        msg.setType(MessageType.LOGIN_FAILED);
+        msg.setType(MessageType.AUTH_FAILED);
         msg.setData("请先登录");
         sendMessage(pipeline, msg);
-    }
-
-    /**
-     * 获取客户端 IP 地址
-     */
-    private String getClientIp(Pipeline pipeline) {
-        String address = pipeline.getRemoteAddressWithoutException();
-        return address != null ? address : "unknown";
-    }
-
-    private void handlePtyRemoteList(Pipeline pipeline) {
-        // 刷新所有 Agent 的 PTY 列表
-        agentManager.refreshAllPtyLists();
-
-        // 等待短暂时间让 Agent 响应
-        try { Thread.sleep(100); } catch (InterruptedException ignored) {}
-
-        List<PtyInfo> list = agentManager.getAllRemotePtys();
-        WsMessage response = new WsMessage();
-        response.setType(MessageType.PTY_REMOTE_LIST);
-        response.setData(Dson.toJson(list));
-        sendMessage(pipeline, response);
     }
 
     private void handlePtyInput(Pipeline pipeline, WsMessage msg) {
@@ -161,26 +130,6 @@ public class RemoteWebSocketHandler implements ReadProcessor<Object> {
                 handler.sendPtyResize(parts[1], msg.getCols(), msg.getRows());
             }
         }
-    }
-
-    private void handlePtyClose(Pipeline pipeline, WsMessage msg) {
-        String fullPtyId = msg.getPtyId();
-        String[] parts = agentManager.parseFullPtyId(fullPtyId);
-        if (parts != null) {
-            String agentId = parts[0];
-            String ptyId = parts[1];
-            ServerTcpHandler handler = agentManager.getAgentHandler(agentId);
-            if (handler != null) {
-                handler.sendPtyClose(ptyId);
-            }
-            agentManager.unregisterPtyOutputListener(fullPtyId);
-            agentManager.removePtyAttach(agentId, ptyId);
-            pipelinePtyMap.remove(pipeline.pipelineId());
-        }
-
-        WsMessage response = new WsMessage();
-        response.setType(MessageType.SUCCESS);
-        sendMessage(pipeline, response);
     }
 
     /**

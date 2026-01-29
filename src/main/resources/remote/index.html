@@ -299,14 +299,12 @@
         PTY_OUTPUT: 'PTY_OUTPUT',
         PTY_INPUT: 'PTY_INPUT',
         PTY_RESIZE: 'PTY_RESIZE',
-        PTY_CLOSE: 'PTY_CLOSE',
         PTY_DETACH: 'PTY_DETACH',
-        PTY_REMOTE_LIST: 'PTY_REMOTE_LIST',
         PTY_ATTACH: 'PTY_ATTACH',
         PTY_VISIBILITY_DISABLED: 'PTY_VISIBILITY_DISABLED',
-        LOGIN: 'LOGIN',
-        LOGIN_SUCCESS: 'LOGIN_SUCCESS',
-        LOGIN_FAILED: 'LOGIN_FAILED',
+        AUTH: 'AUTH',
+        AUTH_SUCCESS: 'AUTH_SUCCESS',
+        AUTH_FAILED: 'AUTH_FAILED',
         ERROR: 'ERROR',
         SUCCESS: 'SUCCESS'
     };
@@ -372,7 +370,8 @@
             this.terminalNames = new Map();
             this.currentPtyId = null;
             this.currentTheme = localStorage.getItem('webcli-theme') || 'dark';
-            this.isLoggedIn = false;
+            this.authToken = localStorage.getItem('webcli-auth-token') || null;
+            this.wsAuthenticated = false;
 
             this.init();
         }
@@ -416,7 +415,7 @@
             document.getElementById('login-dialog').style.display = 'none';
         }
 
-        doLogin() {
+        async doLogin() {
             const username = document.getElementById('username').value.trim();
             const password = document.getElementById('password').value;
             const errorEl = document.getElementById('login-error');
@@ -436,12 +435,37 @@
             loginBtn.disabled = true;
             loginBtn.textContent = '登录中...';
 
-            this.send({
-                type: MessageType.LOGIN,
-                username: username,
-                passwordHash: passwordHash,
-                salt: salt
-            });
+            try {
+                const response = await fetch('/api/remote/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, passwordHash, salt })
+                });
+                const result = await response.json();
+
+                if (result.success && result.token) {
+                    this.authToken = result.token;
+                    localStorage.setItem('webcli-auth-token', result.token);
+                    this.hideLoginDialog();
+                    document.getElementById('password').value = '';
+                    // 通过 WebSocket 发送 token 进行认证
+                    this.authenticateWebSocket();
+                } else {
+                    errorEl.textContent = result.message || '登录失败';
+                }
+            } catch (e) {
+                console.error('登录失败:', e);
+                errorEl.textContent = '登录失败，请检查网络连接';
+            } finally {
+                loginBtn.disabled = false;
+                loginBtn.textContent = '登录';
+            }
+        }
+
+        authenticateWebSocket() {
+            if (this.ws?.readyState === WebSocket.OPEN && this.authToken) {
+                this.send({ type: MessageType.AUTH, data: this.authToken });
+            }
         }
 
         generateSalt() {
@@ -684,15 +708,15 @@
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = `${protocol}//${location.host}/ws`;
             this.ws = new WebSocket(wsUrl);
+            this.wsAuthenticated = false;
 
             this.ws.onopen = () => {
                 this.updateStatus(true);
-                // 如果未登录，显示登录对话框
-                if (!this.isLoggedIn) {
-                    this.showLoginDialog();
+                // 如果有 token，尝试自动认证
+                if (this.authToken) {
+                    this.authenticateWebSocket();
                 } else {
-                    // 重连后，重新 attach 所有已打开的终端
-                    this.reattachAllTerminals();
+                    this.showLoginDialog();
                 }
             };
 
@@ -702,6 +726,7 @@
 
             this.ws.onclose = () => {
                 this.updateStatus(false);
+                this.wsAuthenticated = false;
                 setTimeout(() => this.connect(), 3000);
             };
 
@@ -733,11 +758,11 @@
 
         handleMessage(msg) {
             switch (msg.type) {
-                case MessageType.LOGIN_SUCCESS:
-                    this.handleLoginSuccess();
+                case MessageType.AUTH_SUCCESS:
+                    this.handleAuthSuccess();
                     break;
-                case MessageType.LOGIN_FAILED:
-                    this.handleLoginFailed(msg.data);
+                case MessageType.AUTH_FAILED:
+                    this.handleAuthFailed(msg.data);
                     break;
                 case MessageType.PTY_OUTPUT:
                     if (msg.ptyId && msg.data) {
@@ -749,9 +774,6 @@
                             term.write(text);
                         }
                     }
-                    break;
-                case MessageType.PTY_REMOTE_LIST:
-                    this.displayPtyList(JSON.parse(msg.data));
                     break;
                 case MessageType.SUCCESS:
                     if (msg.ptyId && !this.terminals.has(msg.ptyId)) {
@@ -769,26 +791,21 @@
             }
         }
 
-        handleLoginSuccess() {
-            this.isLoggedIn = true;
-            this.hideLoginDialog();
-            // 清空密码
-            document.getElementById('password').value = '';
-            // 恢复登录按钮
-            const loginBtn = document.getElementById('btn-login');
-            loginBtn.disabled = false;
-            loginBtn.textContent = '登录';
+        handleAuthSuccess() {
+            this.wsAuthenticated = true;
             // 重新 attach 所有已打开的终端
             this.reattachAllTerminals();
         }
 
-        handleLoginFailed(message) {
-            const errorEl = document.getElementById('login-error');
-            errorEl.textContent = message || '登录失败';
-            // 恢复登录按钮
-            const loginBtn = document.getElementById('btn-login');
-            loginBtn.disabled = false;
-            loginBtn.textContent = '登录';
+        handleAuthFailed(message) {
+            this.wsAuthenticated = false;
+            // token 无效，清除并显示登录对话框
+            this.authToken = null;
+            localStorage.removeItem('webcli-auth-token');
+            this.showLoginDialog();
+            if (message && message !== '请先登录') {
+                document.getElementById('login-error').textContent = message;
+            }
         }
 
         handleVisibilityDisabled(ptyId) {
@@ -817,13 +834,34 @@
         }
 
         showPtyList() {
-            if (!this.isLoggedIn) {
+            if (!this.authToken) {
                 this.showLoginDialog();
                 return;
             }
-            this.send({ type: MessageType.PTY_REMOTE_LIST });
-            document.getElementById('overlay').classList.add('show');
-            document.getElementById('pty-list').classList.add('show');
+            // 通过 HTTP API 获取终端列表
+            fetch('/api/remote/terminals', {
+                headers: { 'Authorization': `Bearer ${this.authToken}` }
+            })
+            .then(response => response.json())
+            .then(result => {
+                if (result.success && result.data) {
+                    this.displayPtyList(result.data);
+                    document.getElementById('overlay').classList.add('show');
+                    document.getElementById('pty-list').classList.add('show');
+                } else {
+                    if (result.message && result.message.includes('未登录')) {
+                        this.authToken = null;
+                        localStorage.removeItem('webcli-auth-token');
+                        this.showLoginDialog();
+                    } else {
+                        alert('获取终端列表失败: ' + result.message);
+                    }
+                }
+            })
+            .catch(e => {
+                console.error('获取终端列表失败:', e);
+                alert('获取终端列表失败');
+            });
         }
 
         hidePtyList() {
