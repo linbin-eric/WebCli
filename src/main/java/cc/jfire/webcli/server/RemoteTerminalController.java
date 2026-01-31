@@ -7,6 +7,8 @@ import cc.jfire.webcli.protocol.PtyInfo;
 import cc.jfire.webcli.web.dto.ApiResponse;
 import cc.jfire.webcli.web.dto.LoginRequest;
 import cc.jfire.webcli.web.dto.LoginResponse;
+import cc.jfire.webcli.web.dto.RemoteCreateTerminalRequest;
+import cc.jfire.webcli.web.dto.RenameTerminalRequest;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.List;
@@ -23,6 +25,29 @@ public class RemoteTerminalController {
 
     @Resource
     private AgentManager agentManager;
+
+    /**
+     * 获取 Agent 列表
+     * GET /api/remote/agents
+     */
+    @Path("/api/remote/agents")
+    public ApiResponse<List<String>> listAgents(HttpRequestExtend request)
+    {
+        if (!"GET".equalsIgnoreCase(request.getMethod()))
+        {
+            return ApiResponse.error("Method not allowed");
+        }
+        if (agentManager == null)
+        {
+            return ApiResponse.error("服务未初始化");
+        }
+        String token = getAuthToken(request);
+        if (token == null || !loginManager.validateSession(token))
+        {
+            return ApiResponse.error("未登录或登录已过期");
+        }
+        return ApiResponse.ok(agentManager.getAgentIds());
+    }
 
     /**
      * 登录
@@ -84,6 +109,62 @@ public class RemoteTerminalController {
     }
 
     /**
+     * 创建远程终端（在指定 Agent 上创建）
+     * POST /api/remote/terminal
+     */
+    @Path("/api/remote/terminal")
+    public ApiResponse<PtyInfo> createTerminal(HttpRequestExtend request, RemoteCreateTerminalRequest body)
+    {
+        if (!"POST".equalsIgnoreCase(request.getMethod()))
+        {
+            return ApiResponse.error("Method not allowed");
+        }
+        if (agentManager == null)
+        {
+            return ApiResponse.error("服务未初始化");
+        }
+        String token = getAuthToken(request);
+        if (token == null || !loginManager.validateSession(token))
+        {
+            return ApiResponse.error("未登录或登录已过期");
+        }
+        if (body == null || body.getAgentId() == null || body.getAgentId().isBlank())
+        {
+            return ApiResponse.error("请选择 Agent");
+        }
+
+        String agentId = body.getAgentId().trim();
+        ServerTcpHandler handler = agentManager.getAgentHandler(agentId);
+        if (handler == null)
+        {
+            return ApiResponse.error("Agent 不存在");
+        }
+
+        String name = body.getName() != null ? body.getName().trim() : "终端";
+        Integer cols = body.getCols();
+        Integer rows = body.getRows();
+
+        try
+        {
+            var result = handler.sendPtyCreate(name, cols, rows).join();
+            if ("OK".equalsIgnoreCase(result.getData()) && result.getPtyId() != null)
+            {
+                String fullPtyId = agentId + ":" + result.getPtyId();
+                PtyInfo info = new PtyInfo(fullPtyId, result.getName() != null ? result.getName() : name, true, true);
+                log.info("通过 HTTP API 远端创建终端成功: {}", fullPtyId);
+                return ApiResponse.ok(info);
+            }
+            return ApiResponse.error(result.getData() != null ? result.getData() : "创建终端失败");
+        }
+        catch (Exception e)
+        {
+            log.error("远端创建终端失败: agentId={}", agentId, e);
+            String msg = e.getCause() != null ? e.getCause().getMessage() : e.getMessage();
+            return ApiResponse.error("创建终端失败: " + (msg != null ? msg : "unknown"));
+        }
+    }
+
+    /**
      * 关闭远程终端
      * DELETE /api/remote/terminal/${id}
      */
@@ -119,6 +200,69 @@ public class RemoteTerminalController {
         agentManager.removePtyAttach(agentId, ptyId);
         log.info("通过 HTTP API 关闭远程终端: {}", id);
         return ApiResponse.ok();
+    }
+
+    /**
+     * 重命名远程终端（本地/远端同时可见）
+     * PUT /api/remote/terminal/${id}/name
+     */
+    @Path("/api/remote/terminal/${id}/name")
+    public ApiResponse<PtyInfo> renameTerminal(HttpRequestExtend request, String id, RenameTerminalRequest body)
+    {
+        if (!"PUT".equalsIgnoreCase(request.getMethod()))
+        {
+            return ApiResponse.error("Method not allowed");
+        }
+        if (agentManager == null)
+        {
+            return ApiResponse.error("服务未初始化");
+        }
+        String token = getAuthToken(request);
+        if (token == null || !loginManager.validateSession(token))
+        {
+            return ApiResponse.error("未登录或登录已过期");
+        }
+        if (id == null || id.isBlank())
+        {
+            return ApiResponse.error("无效的终端 ID");
+        }
+        if (body == null || body.getName() == null || body.getName().isBlank())
+        {
+            return ApiResponse.error("终端名称不能为空");
+        }
+
+        String[] parts = agentManager.parseFullPtyId(id);
+        if (parts == null)
+        {
+            return ApiResponse.error("无效的终端 ID");
+        }
+        String agentId = parts[0];
+        String ptyId = parts[1];
+
+        ServerTcpHandler handler = agentManager.getAgentHandler(agentId);
+        if (handler == null)
+        {
+            return ApiResponse.error("Agent 不存在");
+        }
+
+        String newName = body.getName().trim();
+        try
+        {
+            var result = handler.sendPtyRename(ptyId, newName).join();
+            if ("OK".equalsIgnoreCase(result.getData()))
+            {
+                PtyInfo info = new PtyInfo(id, result.getName() != null ? result.getName() : newName, true, true);
+                log.info("通过 HTTP API 远端重命名终端: {} -> {}", id, newName);
+                return ApiResponse.ok(info);
+            }
+            return ApiResponse.error(result.getData() != null ? result.getData() : "重命名失败");
+        }
+        catch (Exception e)
+        {
+            log.error("远端重命名终端失败: id={}", id, e);
+            String msg = e.getCause() != null ? e.getCause().getMessage() : e.getMessage();
+            return ApiResponse.error("重命名失败: " + (msg != null ? msg : "unknown"));
+        }
     }
 
     /**

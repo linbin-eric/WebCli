@@ -18,6 +18,11 @@ public class PtyManager
     private          String[]                               defaultCommand;
     private          String                                 workingDirectory;
     private volatile Consumer<PtyInstance>                  onPtyCreated;
+    /**
+     * 是否允许远端通过 Server 发起“新建终端”请求。
+     * 默认关闭，由本地 Web 界面控制开关。
+     */
+    private volatile boolean                                remoteCreateEnabled      = false;
 
     @cc.jfire.baseutil.Resource
     private WebCliConfig config;
@@ -93,5 +98,15 @@ public class PtyManager
     public void setOnPtyCreated(Consumer<PtyInstance> onPtyCreated)
     {
         this.onPtyCreated = onPtyCreated;
+    }
+
+    public boolean isRemoteCreateEnabled()
+    {
+        return remoteCreateEnabled;
+    }
+
+    public void setRemoteCreateEnabled(boolean remoteCreateEnabled)
+    {
+        this.remoteCreateEnabled = remoteCreateEnabled;
     }
 }

@@ -23,12 +23,22 @@ public class AgentManager
     // 记录每个 Agent 当前被 attach 的 ptyId 列表（不含 agentId 前缀）
     private final Map<String, List<String>>               agentAttachedPtys           = new ConcurrentHashMap<>();
 
-    public void registerAgent(String agentId, ServerTcpHandler handler)
+    /**
+     * 尝试注册 Agent（同名不覆盖）。
+     *
+     * @return true 表示注册成功；false 表示 agentId 已存在
+     */
+    public boolean tryRegisterAgent(String agentId, ServerTcpHandler handler)
     {
-        agents.put(agentId, handler);
+        ServerTcpHandler existing = agents.putIfAbsent(agentId, handler);
+        if (existing != null)
+        {
+            return false;
+        }
         log.info("Agent 已注册: {}", agentId);
         // 检查是否有之前 attach 的终端需要重新 attach
         reattachPtysForAgent(agentId, handler);
+        return true;
     }
 
     private void reattachPtysForAgent(String agentId, ServerTcpHandler handler)
@@ -174,6 +184,11 @@ public class AgentManager
         return agents.get(agentId);
     }
 
+    public List<String> getAgentIds()
+    {
+        return agents.keySet().stream().sorted().toList();
+    }
+
     public String[] parseFullPtyId(String fullPtyId)
     {
         int idx = fullPtyId.indexOf(':');
@@ -182,5 +197,45 @@ public class AgentManager
             return new String[]{fullPtyId.substring(0, idx), fullPtyId.substring(idx + 1)};
         }
         return null;
+    }
+
+    public void upsertPty(String agentId, String ptyId, String name, boolean alive, boolean remoteViewable)
+    {
+        agentPtyLists.compute(agentId, (k, oldList) -> {
+            List<PtyInfo> list = oldList != null ? new ArrayList<>(oldList) : new ArrayList<>();
+            boolean found = false;
+            for (int i = 0; i < list.size(); i++)
+            {
+                PtyInfo existing = list.get(i);
+                if (existing != null && ptyId.equals(existing.getId()))
+                {
+                    existing.setName(name);
+                    existing.setAlive(alive);
+                    existing.setRemoteViewable(remoteViewable);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+            {
+                list.add(new PtyInfo(ptyId, name, alive, remoteViewable));
+            }
+            return list;
+        });
+    }
+
+    public void updatePtyName(String agentId, String ptyId, String name)
+    {
+        agentPtyLists.computeIfPresent(agentId, (k, oldList) -> {
+            List<PtyInfo> list = new ArrayList<>(oldList);
+            for (PtyInfo pty : list)
+            {
+                if (pty != null && ptyId.equals(pty.getId()))
+                {
+                    pty.setName(name);
+                }
+            }
+            return list;
+        });
     }
 }

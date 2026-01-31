@@ -7,6 +7,10 @@
     <link rel="stylesheet" href="lib/xterm.css">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+            height: 100%;
+            overflow: hidden; /* 禁用页面滚动条，仅保留终端内部滚动 */
+        }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: #1e1e1e;
@@ -73,20 +77,37 @@
             border-radius: 4px;
             font-size: 13px;
             cursor: pointer;
-            margin-left: auto;
-            margin-right: 8px;
         }
         .theme-select:hover {
             background: #4c4c4c;
         }
+        .right-tools {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .remote-create-toggle {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: #ccc;
+            user-select: none;
+        }
+        .remote-create-toggle input {
+            cursor: pointer;
+            accent-color: #4ec9b0;
+        }
         #terminal-container {
             flex: 1;
             padding: 8px;
+            min-height: 0; /* 允许 flex 子项收缩，避免出现外层滚动条 */
+            overflow: hidden;
         }
         .status {
             color: #888;
             font-size: 12px;
-            margin-left: auto;
         }
         .status.connected { color: #4ec9b0; }
         .status.disconnected { color: #f14c4c; }
@@ -156,12 +177,18 @@
 <div class="toolbar">
     <button id="btn-new">新建终端</button>
     <div class="tabs" id="tabs"></div>
-    <select class="theme-select" id="theme-select">
-        <option value="dark">深色主题</option>
-        <option value="light">浅色主题</option>
-        <option value="eye-care">护眼主题</option>
-    </select>
-    <span class="status disconnected" id="status">未连接</span>
+    <div class="right-tools">
+        <label class="remote-create-toggle" title="允许远端通过远端 WebCli 在本机创建新终端">
+            <input type="checkbox" id="remote-create-toggle">
+            <span>允许远端新建</span>
+        </label>
+        <select class="theme-select" id="theme-select">
+            <option value="dark">深色主题</option>
+            <option value="light">浅色主题</option>
+            <option value="eye-care">护眼主题</option>
+        </select>
+        <span class="status disconnected" id="status">未连接</span>
+    </div>
 </div>
 <div id="terminal-container"></div>
 <div class="context-menu" id="context-menu">
@@ -262,6 +289,7 @@
             this.nextTerminalNumber = 1;
             this.contextMenuPtyId = null;
             this.currentTheme = localStorage.getItem('webcli-theme') || 'dark';
+            this.syncTimer = null;
 
             this.init();
         }
@@ -271,6 +299,7 @@
             this.initContextMenu();
             this.initShortcuts();
             this.initThemeSelector();
+            this.initRemoteCreateToggle();
 
             document.getElementById('btn-new').addEventListener('click', () => this.createPty());
             window.addEventListener('resize', () => this.fitTerminal());
@@ -295,6 +324,47 @@
             this.terminals.forEach((term) => {
                 term.options.theme = theme;
             });
+        }
+
+        initRemoteCreateToggle() {
+            const toggle = document.getElementById('remote-create-toggle');
+            if (!toggle) return;
+
+            const load = async () => {
+                try {
+                    const response = await fetch('/api/remote-create');
+                    const result = await response.json();
+                    if (result.success) {
+                        toggle.checked = !!result.data;
+                    }
+                } catch (e) {
+                    console.error('获取远端新建开关失败:', e);
+                }
+            };
+
+            toggle.addEventListener('change', async () => {
+                const desired = toggle.checked;
+                try {
+                    const response = await fetch('/api/remote-create', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ enabled: desired })
+                    });
+                    const result = await response.json();
+                    if (result.success) {
+                        toggle.checked = !!result.data;
+                    } else {
+                        toggle.checked = !desired;
+                        alert('设置失败: ' + (result.message || 'unknown'));
+                    }
+                } catch (e) {
+                    toggle.checked = !desired;
+                    console.error('设置远端新建开关失败:', e);
+                    alert('设置失败');
+                }
+            });
+
+            load();
         }
 
         initShortcuts() {
@@ -494,6 +564,7 @@
             this.ws.onopen = () => {
                 this.updateStatus(true);
                 this.loadTerminalList();
+                this.startTerminalSync();
             };
 
             this.ws.onmessage = (e) => {
@@ -502,10 +573,90 @@
 
             this.ws.onclose = () => {
                 this.updateStatus(false);
+                this.stopTerminalSync();
                 setTimeout(() => this.connect(), 3000);
             };
 
             this.ws.onerror = (e) => console.error('WebSocket error:', e);
+        }
+
+        startTerminalSync() {
+            if (this.syncTimer) return;
+            this.syncTimer = setInterval(() => this.syncTerminalList(), 2000);
+        }
+
+        stopTerminalSync() {
+            if (this.syncTimer) {
+                clearInterval(this.syncTimer);
+                this.syncTimer = null;
+            }
+        }
+
+        async syncTerminalList() {
+            try {
+                const response = await fetch('/api/terminals');
+                const result = await response.json();
+                if (result.success && Array.isArray(result.data)) {
+                    this.applyTerminalList(result.data);
+                }
+            } catch (e) {
+                // 静默失败，下一轮继续
+            }
+        }
+
+        applyTerminalList(list) {
+            const aliveIds = new Set();
+            for (const ptyInfo of list) {
+                if (!ptyInfo || !ptyInfo.id) continue;
+                if (!ptyInfo.alive) continue;
+                const ptyId = ptyInfo.id;
+                aliveIds.add(ptyId);
+
+                const name = ptyInfo.name || ptyId;
+                const remoteViewable = !!ptyInfo.remoteViewable;
+
+                if (!this.terminals.has(ptyId)) {
+                    this.terminalRemoteViewable.set(ptyId, remoteViewable);
+                    const shouldSwitch = this.terminals.size === 0;
+                    this.attachPty(ptyId, name, shouldSwitch);
+                    continue;
+                }
+
+                if (this.terminalNames.get(ptyId) !== name) {
+                    this.terminalNames.set(ptyId, name);
+                    this.updateTab(ptyId);
+                }
+                if ((this.terminalRemoteViewable.get(ptyId) || false) !== remoteViewable) {
+                    this.terminalRemoteViewable.set(ptyId, remoteViewable);
+                    this.updateTab(ptyId);
+                }
+            }
+
+            // 清理已不存在/已退出的终端
+            for (const ptyId of Array.from(this.terminals.keys())) {
+                if (!aliveIds.has(ptyId)) {
+                    this.removeTerminalUi(ptyId);
+                }
+            }
+        }
+
+        removeTerminalUi(ptyId) {
+            this.terminals.get(ptyId)?.dispose();
+            this.terminals.delete(ptyId);
+            this.fitAddons.delete(ptyId);
+            this.terminalNames.delete(ptyId);
+            this.terminalRemoteViewable.delete(ptyId);
+            document.querySelector(`.tab[data-pty-id="${ptyId}"]`)?.remove();
+
+            if (this.currentPtyId === ptyId) {
+                const firstPty = this.terminals.keys().next().value;
+                if (firstPty) {
+                    this.switchTerminal(firstPty);
+                } else {
+                    this.currentPtyId = null;
+                    document.getElementById('terminal-container').innerHTML = '';
+                }
+            }
         }
 
         async loadTerminalList() {

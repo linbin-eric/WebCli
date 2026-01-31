@@ -3,6 +3,7 @@ package cc.jfire.webcli.config;
 import cc.jfire.baseutil.PostConstruct;
 import cc.jfire.baseutil.Resource;
 import cc.jfire.jfire.core.inject.notated.PropertyRead;
+import cc.jfire.webcli.util.AgentIdUtil;
 import lombok.Data;
 
 @Data
@@ -15,6 +16,13 @@ public class WebCliConfig
     private String[] shellArgs;
     @PropertyRead("webcli.shell.directory")
     private String   workingDirectory;
+    /**
+     * Agent 标识（会作为远端展示名称的一部分，并参与认证消息的 MAC 计算）
+     * <p>
+     * 注意：不允许包含 ':' 或 '|' 等分隔符；不建议包含空白字符。
+     */
+    @PropertyRead("webcli.agentId")
+    private String   agentId;
 
     @PostConstruct
     public void init()
@@ -41,6 +49,14 @@ public class WebCliConfig
         if (workingDirectory == null || workingDirectory.isBlank())
         {
             workingDirectory = System.getProperty("user.home");
+        }
+        if (agentId == null || agentId.isBlank())
+        {
+            agentId = AgentIdUtil.defaultAgentId();
+        }
+        else
+        {
+            agentId = AgentIdUtil.sanitize(agentId);
         }
     }
     // P1 阶段新增配置

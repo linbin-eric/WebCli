@@ -3,6 +3,10 @@ webcli:
   mode: all
   # 预共享密钥(PSK)，用于认证
   token: 123456
+  # Agent 标识（远端展示用；同名会自动追加序号）
+  # - 仅建议使用字母/数字/下划线/短横线
+  # - 不要包含 ':' 或 '|'（用于协议分隔）
+  agentId: mac-studio
   # Shell 配置（留空则自动检测）
   shell:
     cmd:

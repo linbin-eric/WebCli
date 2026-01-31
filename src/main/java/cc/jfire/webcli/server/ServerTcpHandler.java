@@ -23,6 +23,10 @@ import java.security.PublicKey;
 import java.security.SecureRandom;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Base64;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 public class ServerTcpHandler implements ReadProcessor<IoBuffer> {
@@ -33,12 +37,14 @@ public class ServerTcpHandler implements ReadProcessor<IoBuffer> {
     private Pipeline pipeline;
     private AesGcmCrypto crypto;
     private volatile boolean authenticated = false;
+    private volatile boolean registeredToManager = false;
     private String agentId;
     private KeyPair serverKeyPair;
     private byte[] clientNonce;
     private String clientPubKey;
     private byte[] serverNonce;
     private byte[] sessionKey;
+    private final ConcurrentHashMap<String, CompletableFuture<TcpMessage>> pendingRequests = new ConcurrentHashMap<>();
 
     public ServerTcpHandler(WebCliConfig config, AgentManager agentManager) {
         this.config = config;
@@ -75,6 +81,7 @@ public class ServerTcpHandler implements ReadProcessor<IoBuffer> {
             case PTY_LIST_RESPONSE -> handlePtyListResponse(msg);
             case PTY_OUTPUT -> handlePtyOutput(msg);
             case PTY_VISIBILITY_CHANGED -> handlePtyVisibilityChanged(msg);
+            case PTY_CREATE_RESULT, PTY_RENAME_RESULT -> handleRequestResult(msg);
             case HEARTBEAT -> sendHeartbeatResponse();
             default -> log.warn("未知消息类型: {}", msg.getType());
         }
@@ -155,8 +162,25 @@ public class ServerTcpHandler implements ReadProcessor<IoBuffer> {
             }
 
             this.crypto = new AesGcmCrypto(sessionKey);
+            boolean registered = agentManager.tryRegisterAgent(agentId, this);
+            if (!registered)
+            {
+                TcpMessage result = new TcpMessage();
+                result.setType(TcpMessageType.AUTH_RESULT);
+                result.setAgentId(agentId);
+                result.setData("DUPLICATE_AGENT_ID");
+                sendMessage(result, false); // 认证阶段保持明文，避免双方状态不同步
+                log.warn("Agent 注册失败：agentId 重名: {}", agentId);
+                return;
+            }
+
             this.authenticated = true;
-            agentManager.registerAgent(agentId, this);
+            this.registeredToManager = true;
+            TcpMessage result = new TcpMessage();
+            result.setType(TcpMessageType.AUTH_RESULT);
+            result.setAgentId(agentId);
+            result.setData("OK");
+            sendMessage(result, false); // 认证阶段保持明文，避免双方状态不同步
             log.info("Agent 认证成功: {}", agentId);
         } catch (Exception e) {
             log.error("处理 AUTH_FINISH 失败", e);
@@ -175,6 +199,39 @@ public class ServerTcpHandler implements ReadProcessor<IoBuffer> {
         if (msg.getRemoteViewable() != null && !msg.getRemoteViewable()) {
             agentManager.handlePtyVisibilityDisabled(agentId, msg.getPtyId());
             log.info("终端 {}:{} 已关闭远端可见", agentId, msg.getPtyId());
+        }
+    }
+
+    private void handleRequestResult(TcpMessage msg)
+    {
+        String requestId = msg.getRequestId();
+        if (requestId == null || requestId.isBlank())
+        {
+            log.warn("收到 {} 但缺少 requestId", msg.getType());
+            return;
+        }
+
+        // 优先更新缓存列表（便于远端立刻看到）
+        if ("OK".equalsIgnoreCase(msg.getData()))
+        {
+            if (msg.getType() == TcpMessageType.PTY_CREATE_RESULT && msg.getPtyId() != null && msg.getName() != null)
+            {
+                agentManager.upsertPty(agentId, msg.getPtyId(), msg.getName(), true, true);
+            }
+            if (msg.getType() == TcpMessageType.PTY_RENAME_RESULT && msg.getPtyId() != null && msg.getName() != null)
+            {
+                agentManager.updatePtyName(agentId, msg.getPtyId(), msg.getName());
+            }
+        }
+
+        CompletableFuture<TcpMessage> future = pendingRequests.remove(requestId);
+        if (future != null)
+        {
+            future.complete(msg);
+        }
+        else
+        {
+            log.debug("requestId {} 对应的 future 不存在或已超时移除", requestId);
         }
     }
 
@@ -284,10 +341,56 @@ public class ServerTcpHandler implements ReadProcessor<IoBuffer> {
         sendMessage(msg, true);
     }
 
+    public CompletableFuture<TcpMessage> sendPtyCreate(String name, Integer cols, Integer rows)
+    {
+        if (!authenticated)
+        {
+            return CompletableFuture.failedFuture(new IllegalStateException("Agent 未认证"));
+        }
+        String requestId = UUID.randomUUID().toString();
+        CompletableFuture<TcpMessage> future = new CompletableFuture<>();
+        pendingRequests.put(requestId, future);
+        future.orTimeout(5, TimeUnit.SECONDS).whenComplete((r, e) -> pendingRequests.remove(requestId));
+
+        TcpMessage msg = new TcpMessage();
+        msg.setType(TcpMessageType.PTY_CREATE);
+        msg.setRequestId(requestId);
+        msg.setName(name);
+        msg.setCols(cols);
+        msg.setRows(rows);
+        sendMessage(msg, true);
+        return future;
+    }
+
+    public CompletableFuture<TcpMessage> sendPtyRename(String ptyId, String newName)
+    {
+        if (!authenticated)
+        {
+            return CompletableFuture.failedFuture(new IllegalStateException("Agent 未认证"));
+        }
+        String requestId = UUID.randomUUID().toString();
+        CompletableFuture<TcpMessage> future = new CompletableFuture<>();
+        pendingRequests.put(requestId, future);
+        future.orTimeout(5, TimeUnit.SECONDS).whenComplete((r, e) -> pendingRequests.remove(requestId));
+
+        TcpMessage msg = new TcpMessage();
+        msg.setType(TcpMessageType.PTY_RENAME);
+        msg.setRequestId(requestId);
+        msg.setPtyId(ptyId);
+        msg.setName(newName);
+        sendMessage(msg, true);
+        return future;
+    }
+
     @Override
     public void readFailed(Throwable e, ReadProcessorNode next) {
         log.error("Agent 连接断开: {}", agentId, e);
-        if (agentId != null) {
+        for (CompletableFuture<TcpMessage> future : pendingRequests.values())
+        {
+            future.completeExceptionally(e);
+        }
+        pendingRequests.clear();
+        if (registeredToManager && agentId != null) {
             agentManager.unregisterAgent(agentId);
         }
     }

@@ -7,6 +7,10 @@
     <link rel="stylesheet" href="lib/xterm.css">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+            height: 100%;
+            overflow: hidden; /* 禁用页面滚动条，仅保留终端内部滚动 */
+        }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: #1e1e1e;
@@ -62,11 +66,12 @@
         #terminal-container {
             flex: 1;
             padding: 8px;
+            min-height: 0; /* 允许 flex 子项收缩，避免出现外层滚动条 */
+            overflow: hidden;
         }
         .status {
             color: #888;
             font-size: 12px;
-            margin-left: auto;
         }
         .status.connected { color: #4ec9b0; }
         .status.disconnected { color: #f14c4c; }
@@ -92,6 +97,47 @@
             font-size: 16px;
             color: #4ec9b0;
         }
+        .agent-group {
+            border: 1px solid #3a3a3a;
+            border-radius: 6px;
+            overflow: hidden;
+            margin-bottom: 10px;
+            background: #262626;
+        }
+        .agent-header {
+            padding: 10px 12px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            user-select: none;
+        }
+        .agent-header:hover { background: #2f2f2f; }
+        .agent-toggle {
+            width: 14px;
+            text-align: center;
+            color: #cfcfcf;
+            opacity: 0.9;
+        }
+        .agent-name {
+            font-size: 14px;
+            color: #fff;
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .agent-meta {
+            font-size: 12px;
+            color: #9a9a9a;
+            white-space: nowrap;
+        }
+        .agent-terminals {
+            padding: 8px 8px 10px;
+            border-top: 1px solid #3a3a3a;
+        }
+        .agent-terminals.collapsed { display: none; }
         .pty-list-item {
             padding: 8px 12px;
             cursor: pointer;
@@ -103,7 +149,7 @@
         }
         .pty-list-item:hover { background: #094771; }
         .pty-list-item .name { font-size: 14px; }
-        .pty-list-item .agent { font-size: 12px; color: #888; }
+        .pty-list-item .meta { font-size: 12px; color: #9a9a9a; }
         .pty-list-empty {
             color: #888;
             text-align: center;
@@ -128,11 +174,15 @@
             border-radius: 4px;
             font-size: 13px;
             cursor: pointer;
-            margin-left: auto;
-            margin-right: 8px;
         }
         .theme-select:hover {
             background: #4c4c4c;
+        }
+        .right-tools {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
         .shortcuts {
             position: fixed;
@@ -245,25 +295,131 @@
             background: rgba(0,0,0,0.7);
             z-index: 1000;
         }
+        /* 创建终端对话框样式 */
+        .create-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.7);
+            z-index: 1002;
+            display: none;
+        }
+        .create-dialog {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: #2d2d2d;
+            border: 1px solid #404040;
+            border-radius: 8px;
+            padding: 24px;
+            min-width: 360px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+            z-index: 1003;
+            display: none;
+        }
+        .create-dialog h3 {
+            margin-bottom: 20px;
+            font-size: 18px;
+            color: #4ec9b0;
+            text-align: center;
+        }
+        .create-dialog .form-group {
+            margin-bottom: 16px;
+        }
+        .create-dialog label {
+            display: block;
+            margin-bottom: 6px;
+            font-size: 13px;
+            color: #ccc;
+        }
+        .create-dialog input,
+        .create-dialog select {
+            width: 100%;
+            padding: 10px 12px;
+            background: #1e1e1e;
+            border: 1px solid #404040;
+            border-radius: 4px;
+            color: #fff;
+            font-size: 14px;
+        }
+        .create-dialog input:focus,
+        .create-dialog select:focus {
+            outline: none;
+            border-color: #0e639c;
+        }
+        .create-dialog .actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 6px;
+        }
+        .create-dialog .btn {
+            flex: 1;
+            padding: 10px;
+            background: #0e639c;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        .create-dialog .btn:hover { background: #1177bb; }
+        .create-dialog .btn:disabled { background: #555; cursor: not-allowed; }
+        .create-dialog .btn.secondary {
+            background: #3c3c3c;
+        }
+        .create-dialog .btn.secondary:hover {
+            background: #4c4c4c;
+        }
+        .create-dialog .error-msg {
+            color: #f14c4c;
+            font-size: 12px;
+            margin-top: 12px;
+            text-align: center;
+            min-height: 18px;
+        }
     </style>
 </head>
 <body>
 <div class="toolbar">
     <span class="title">Remote Terminal</span>
     <button id="btn-connect">连接终端</button>
+    <button id="btn-new">新建终端</button>
     <div class="tabs" id="tabs"></div>
-    <select class="theme-select" id="theme-select">
-        <option value="dark">深色主题</option>
-        <option value="light">浅色主题</option>
-        <option value="eye-care">护眼主题</option>
-    </select>
-    <span class="status disconnected" id="status">未连接</span>
+    <div class="right-tools">
+        <select class="theme-select" id="theme-select">
+            <option value="dark">深色主题</option>
+            <option value="light">浅色主题</option>
+            <option value="eye-care">护眼主题</option>
+        </select>
+        <span class="status disconnected" id="status">未连接</span>
+    </div>
 </div>
 <div id="terminal-container"></div>
 <div class="overlay" id="overlay"></div>
 <div class="pty-list" id="pty-list">
     <h3>可用终端</h3>
     <div id="pty-list-content"></div>
+</div>
+<!-- 创建终端对话框 -->
+<div class="create-overlay" id="create-overlay"></div>
+<div class="create-dialog" id="create-dialog">
+    <h3>新建终端</h3>
+    <div class="form-group">
+        <label for="create-agent">选择 Agent</label>
+        <select id="create-agent"></select>
+    </div>
+    <div class="form-group">
+        <label for="create-name">终端名称</label>
+        <input type="text" id="create-name" placeholder="可选，默认：终端">
+    </div>
+    <div class="actions">
+        <button class="btn secondary" id="btn-create-cancel">取消</button>
+        <button class="btn" id="btn-create-confirm">创建</button>
+    </div>
+    <div class="error-msg" id="create-error"></div>
 </div>
 <!-- 登录对话框 -->
 <div class="login-overlay" id="login-overlay"></div>
@@ -373,6 +529,7 @@
             this.currentTheme = localStorage.getItem('webcli-theme') || 'dark';
             this.authToken = localStorage.getItem('webcli-auth-token') || null;
             this.wsAuthenticated = false;
+            this.syncTimer = null;
 
             this.init();
         }
@@ -382,8 +539,10 @@
             this.initShortcuts();
             this.initThemeSelector();
             this.initLogin();
+            this.initCreateDialog();
 
             document.getElementById('btn-connect').addEventListener('click', () => this.showPtyList());
+            document.getElementById('btn-new').addEventListener('click', () => this.showCreateDialog());
             document.getElementById('overlay').addEventListener('click', () => this.hidePtyList());
             window.addEventListener('resize', () => this.fitTerminal());
         }
@@ -414,6 +573,129 @@
         hideLoginDialog() {
             document.getElementById('login-overlay').style.display = 'none';
             document.getElementById('login-dialog').style.display = 'none';
+        }
+
+        initCreateDialog() {
+            const overlay = document.getElementById('create-overlay');
+            const confirmBtn = document.getElementById('btn-create-confirm');
+            const cancelBtn = document.getElementById('btn-create-cancel');
+            const nameInput = document.getElementById('create-name');
+
+            overlay.addEventListener('click', () => this.hideCreateDialog());
+            cancelBtn.addEventListener('click', () => this.hideCreateDialog());
+            confirmBtn.addEventListener('click', () => this.doCreateTerminal());
+
+            nameInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') this.doCreateTerminal();
+            });
+        }
+
+        async showCreateDialog() {
+            if (!this.authToken) {
+                this.showLoginDialog();
+                return;
+            }
+            const overlay = document.getElementById('create-overlay');
+            const dialog = document.getElementById('create-dialog');
+            const errorEl = document.getElementById('create-error');
+            const agentSelect = document.getElementById('create-agent');
+            const nameInput = document.getElementById('create-name');
+            const confirmBtn = document.getElementById('btn-create-confirm');
+
+            errorEl.textContent = '';
+            confirmBtn.disabled = true;
+            agentSelect.innerHTML = '';
+            nameInput.value = '';
+
+            overlay.style.display = 'block';
+            dialog.style.display = 'block';
+
+            try {
+                const response = await fetch('/api/remote/agents', {
+                    headers: { 'Authorization': `Bearer ${this.authToken}` }
+                });
+                const result = await response.json();
+                if (result.success && Array.isArray(result.data)) {
+                    if (result.data.length === 0) {
+                        errorEl.textContent = '暂无可用 Agent（请确认 Agent 已连接）';
+                        return;
+                    }
+                    for (const agentId of result.data) {
+                        const option = document.createElement('option');
+                        option.value = agentId;
+                        option.textContent = agentId;
+                        agentSelect.appendChild(option);
+                    }
+                    confirmBtn.disabled = false;
+                    agentSelect.focus();
+                } else {
+                    if (result.message && result.message.includes('未登录')) {
+                        this.authToken = null;
+                        localStorage.removeItem('webcli-auth-token');
+                        this.hideCreateDialog();
+                        this.showLoginDialog();
+                    } else {
+                        errorEl.textContent = result.message || '获取 Agent 列表失败';
+                    }
+                }
+            } catch (e) {
+                console.error('获取 Agent 列表失败:', e);
+                errorEl.textContent = '获取 Agent 列表失败';
+            }
+        }
+
+        hideCreateDialog() {
+            document.getElementById('create-overlay').style.display = 'none';
+            document.getElementById('create-dialog').style.display = 'none';
+            document.getElementById('create-error').textContent = '';
+        }
+
+        async doCreateTerminal() {
+            const agentId = document.getElementById('create-agent').value;
+            const name = document.getElementById('create-name').value.trim();
+            const errorEl = document.getElementById('create-error');
+            const confirmBtn = document.getElementById('btn-create-confirm');
+
+            if (!agentId) {
+                errorEl.textContent = '请选择 Agent';
+                return;
+            }
+
+            confirmBtn.disabled = true;
+            const oldText = confirmBtn.textContent;
+            confirmBtn.textContent = '创建中...';
+            errorEl.textContent = '';
+
+            try {
+                const response = await fetch('/api/remote/terminal', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${this.authToken}`
+                    },
+                    body: JSON.stringify({ agentId, name: name || null })
+                });
+                const result = await response.json();
+                if (result.success && result.data) {
+                    this.attachPty(result.data.id, result.data.name);
+                    this.hideCreateDialog();
+                } else {
+                    if (result.message && result.message.includes('未登录')) {
+                        this.authToken = null;
+                        localStorage.removeItem('webcli-auth-token');
+                        this.hideCreateDialog();
+                        this.showLoginDialog();
+                    } else {
+                        errorEl.textContent = result.message || '创建终端失败';
+                    }
+                }
+            } catch (e) {
+                console.error('创建终端失败:', e);
+                errorEl.textContent = '创建终端失败';
+            } finally {
+                confirmBtn.disabled = false;
+                confirmBtn.textContent = oldText;
+            }
         }
 
         async doLogin() {
@@ -732,6 +1014,7 @@
             this.ws.onclose = () => {
                 this.updateStatus(false);
                 this.wsAuthenticated = false;
+                this.stopTerminalSync();
                 setTimeout(() => this.connect(), 3000);
             };
 
@@ -800,16 +1083,67 @@
             this.wsAuthenticated = true;
             // 重新 attach 所有已打开的终端
             this.reattachAllTerminals();
+            this.startTerminalSync();
         }
 
         handleAuthFailed(message) {
             this.wsAuthenticated = false;
+            this.stopTerminalSync();
             // token 无效，清除并显示登录对话框
             this.authToken = null;
             localStorage.removeItem('webcli-auth-token');
             this.showLoginDialog();
             if (message && message !== '请先登录') {
                 document.getElementById('login-error').textContent = message;
+            }
+        }
+
+        startTerminalSync() {
+            if (this.syncTimer || !this.authToken) return;
+            this.syncTimer = setInterval(() => this.syncRemoteTerminalList(), 2500);
+        }
+
+        stopTerminalSync() {
+            if (this.syncTimer) {
+                clearInterval(this.syncTimer);
+                this.syncTimer = null;
+            }
+        }
+
+        async syncRemoteTerminalList() {
+            if (!this.authToken) return;
+            try {
+                const response = await fetch('/api/remote/terminals', {
+                    headers: { 'Authorization': `Bearer ${this.authToken}` }
+                });
+                const result = await response.json();
+                if (result.success && Array.isArray(result.data)) {
+                    const available = new Set();
+                    for (const pty of result.data) {
+                        if (!pty || !pty.id) continue;
+                        if (!pty.alive) continue;
+                        available.add(pty.id);
+                        const name = pty.name || pty.id;
+                        if (this.terminalNames.get(pty.id) !== name) {
+                            this.terminalNames.set(pty.id, name);
+                            this.updateTabName(pty.id);
+                        }
+                    }
+
+                    // 自动清理已不存在/已退出的终端
+                    for (const ptyId of Array.from(this.terminals.keys())) {
+                        if (!available.has(ptyId)) {
+                            this.closePty(ptyId);
+                        }
+                    }
+                    return;
+                }
+
+                if (result.message && result.message.includes('未登录')) {
+                    this.handleAuthFailed(result.message);
+                }
+            } catch (e) {
+                // 静默失败，下一轮继续
             }
         }
 
@@ -881,25 +1215,80 @@
                 return;
             }
 
-            content.innerHTML = list.map(pty => {
-                const [agentId, ptyId] = pty.id.split(':');
-                const shortAgentId = agentId.substring(0, 8);
+            const escapeHtml = (s) => String(s ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+
+            const grouped = new Map();
+            for (const pty of list) {
+                const id = String(pty.id || '');
+                const idx = id.indexOf(':');
+                const agentId = idx > 0 ? id.substring(0, idx) : 'unknown';
+                if (!grouped.has(agentId)) grouped.set(agentId, []);
+                grouped.get(agentId).push(pty);
+            }
+
+            const agentIds = Array.from(grouped.keys()).sort((a, b) => a.localeCompare(b));
+            content.innerHTML = agentIds.map(agentId => {
+                const terminals = grouped.get(agentId) || [];
+                terminals.sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+                const agentTitle = `${agentId}（${terminals.length}）`;
                 return `
-                    <div class="pty-list-item" data-pty-id="${pty.id}">
-                        <span class="name">${pty.name}</span>
-                        <span class="agent">Agent: ${shortAgentId}...</span>
+                    <div class="agent-group" data-agent-id="${escapeHtml(agentId)}">
+                        <div class="agent-header" role="button" tabindex="0" title="${escapeHtml(agentTitle)}">
+                            <span class="agent-toggle">▸</span>
+                            <span class="agent-name">${escapeHtml(agentId)}</span>
+                            <span class="agent-meta">${terminals.length} 个终端</span>
+                        </div>
+                        <div class="agent-terminals collapsed">
+                            ${terminals.map(pty => `
+                                <div class="pty-list-item" data-pty-id="${escapeHtml(pty.id)}">
+                                    <span class="name">${escapeHtml(pty.name)}</span>
+                                    <span class="meta">${pty.alive ? '运行中' : '已退出'}</span>
+                                </div>
+                            `).join('')}
+                        </div>
                     </div>
                 `;
             }).join('');
 
+            const toggleGroup = (groupEl) => {
+                const terminalsEl = groupEl.querySelector('.agent-terminals');
+                const toggleEl = groupEl.querySelector('.agent-toggle');
+                const isCollapsed = terminalsEl.classList.contains('collapsed');
+                terminalsEl.classList.toggle('collapsed', !isCollapsed);
+                toggleEl.textContent = isCollapsed ? '▾' : '▸';
+            };
+
+            content.querySelectorAll('.agent-group').forEach(groupEl => {
+                const header = groupEl.querySelector('.agent-header');
+                header.addEventListener('click', () => toggleGroup(groupEl));
+                header.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        toggleGroup(groupEl);
+                    }
+                });
+            });
+
             content.querySelectorAll('.pty-list-item').forEach(item => {
-                item.addEventListener('click', () => {
+                item.addEventListener('click', (e) => {
+                    e.stopPropagation();
                     const ptyId = item.dataset.ptyId;
                     const name = item.querySelector('.name').textContent;
                     this.attachPty(ptyId, name);
                     this.hidePtyList();
                 });
             });
+
+            // 单个 Agent 时默认展开，减少一次点击
+            if (agentIds.length === 1) {
+                const firstGroup = content.querySelector('.agent-group');
+                if (firstGroup) toggleGroup(firstGroup);
+            }
         }
 
         attachPty(ptyId, name) {
@@ -909,6 +1298,64 @@
             }
             this.terminalNames.set(ptyId, name);
             this.send({ type: MessageType.PTY_ATTACH, ptyId });
+        }
+
+        showRenameDialog(ptyId) {
+            if (!this.authToken) {
+                this.showLoginDialog();
+                return;
+            }
+            const currentName = this.terminalNames.get(ptyId) || '';
+            const newName = prompt('请输入新的终端名称:', currentName);
+            if (newName === null) return;
+            const trimmedName = newName.trim();
+            if (trimmedName === '') {
+                alert('终端名称不能为空');
+                return;
+            }
+            if (trimmedName === currentName) return;
+            this.renamePty(ptyId, trimmedName);
+        }
+
+        async renamePty(ptyId, newName) {
+            try {
+                const response = await fetch(`/api/remote/terminal/${ptyId}/name`, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${this.authToken}`
+                    },
+                    body: JSON.stringify({ name: newName })
+                });
+                const result = await response.json();
+                if (result.success && result.data) {
+                    this.terminalNames.set(ptyId, result.data.name);
+                    this.updateTabName(ptyId);
+                } else {
+                    if (result.message && result.message.includes('未登录')) {
+                        this.authToken = null;
+                        localStorage.removeItem('webcli-auth-token');
+                        this.showLoginDialog();
+                    } else {
+                        alert('重命名失败: ' + (result.message || 'unknown'));
+                    }
+                }
+            } catch (e) {
+                console.error('重命名失败:', e);
+                alert('重命名失败');
+            }
+        }
+
+        updateTabName(ptyId) {
+            const tab = document.querySelector(`.tab[data-pty-id="${ptyId}"]`);
+            if (!tab) return;
+            const name = this.terminalNames.get(ptyId) || ptyId;
+            const nameEl = tab.querySelector('.tab-name');
+            if (nameEl) {
+                nameEl.textContent = name;
+            } else {
+                tab.innerHTML = `<span class="tab-name">${name}</span><span class="close">×</span>`;
+            }
         }
 
         addTerminal(ptyId) {
@@ -967,6 +1414,10 @@
                 } else {
                     this.switchTerminal(ptyId);
                 }
+            });
+            tab.addEventListener('dblclick', (e) => {
+                if (e.target.classList.contains('close')) return;
+                this.showRenameDialog(ptyId);
             });
 
             tabs.appendChild(tab);

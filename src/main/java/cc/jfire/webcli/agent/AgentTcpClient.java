@@ -17,6 +17,7 @@ import cc.jfire.webcli.protocol.TcpMessage;
 import cc.jfire.webcli.protocol.TcpMessageType;
 import cc.jfire.webcli.pty.PtyInstance;
 import cc.jfire.webcli.pty.PtyManager;
+import cc.jfire.webcli.util.AgentIdUtil;
 import lombok.extern.slf4j.Slf4j;
 
 import javax.crypto.KeyAgreement;
@@ -33,7 +34,7 @@ import java.security.spec.X509EncodedKeySpec;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -48,7 +49,9 @@ public class AgentTcpClient implements ReadProcessor<IoBuffer> {
 
     private final WebCliConfig config;
     private final PtyManager ptyManager;
-    private final String agentId = UUID.randomUUID().toString();
+    private final String agentIdBase;
+    private volatile String agentId;
+    private int agentIdIndex = 1;
     private final SecureRandom secureRandom = new SecureRandom();
     private ClientChannel clientChannel;
     private Pipeline pipeline;
@@ -66,6 +69,8 @@ public class AgentTcpClient implements ReadProcessor<IoBuffer> {
     public AgentTcpClient(WebCliConfig config, PtyManager ptyManager) {
         this.config = config;
         this.ptyManager = ptyManager;
+        this.agentIdBase = AgentIdUtil.sanitize(config.getAgentId());
+        this.agentId = this.agentIdBase;
     }
 
     public void connect() {
@@ -156,12 +161,15 @@ public class AgentTcpClient implements ReadProcessor<IoBuffer> {
     private void handleMessage(TcpMessage msg) {
         switch (msg.getType()) {
             case AUTH_RESPONSE -> handleAuthResponse(msg);
+            case AUTH_RESULT -> handleAuthResult(msg);
             case PTY_LIST_REQUEST -> handlePtyListRequest();
             case PTY_INPUT -> handlePtyInput(msg);
             case PTY_RESIZE -> handlePtyResize(msg);
             case PTY_CLOSE -> handlePtyClose(msg);
             case PTY_ATTACH -> handlePtyAttach(msg);
             case PTY_DETACH -> handlePtyDetach(msg);
+            case PTY_CREATE -> handlePtyCreate(msg);
+            case PTY_RENAME -> handlePtyRename(msg);
             case HEARTBEAT -> {} // 忽略心跳响应
             default -> log.warn("未知消息类型: {}", msg.getType());
         }
@@ -203,13 +211,40 @@ public class AgentTcpClient implements ReadProcessor<IoBuffer> {
             finish.setAgentId(agentId);
             finish.setFinishMac(finishMac);
             sendMessage(finish, false); // AUTH_FINISH 明文
-
-            authenticated = true;
-            log.info("认证成功，会话密钥已建立");
-            registerVisibilityListeners();
+            log.info("会话密钥已建立，等待服务端确认注册...");
         } catch (Exception e) {
             log.error("处理认证响应失败", e);
         }
+    }
+
+    private void handleAuthResult(TcpMessage msg)
+    {
+        String result = msg.getData();
+        if ("OK".equalsIgnoreCase(result))
+        {
+            authenticated = true;
+            log.info("Agent 注册成功: {}", agentId);
+            registerVisibilityListeners();
+            return;
+        }
+        if ("DUPLICATE_AGENT_ID".equalsIgnoreCase(result))
+        {
+            String old = agentId;
+            bumpAgentId();
+            log.warn("agentId 重名，自动改名并重试注册: {} -> {}", old, agentId);
+            sendAuthRequest();
+            return;
+        }
+        log.warn("未知认证结果: {}", result);
+    }
+
+    private synchronized void bumpAgentId()
+    {
+        authenticated = false;
+        crypto = null;
+        sessionKey = null;
+        agentIdIndex++;
+        agentId = AgentIdUtil.withSuffix(agentIdBase, agentIdIndex);
     }
 
     private void handlePtyListRequest() {
@@ -292,6 +327,123 @@ public class AgentTcpClient implements ReadProcessor<IoBuffer> {
                 pty.removeOutputListener(listener);
             }
         }
+    }
+
+    private void handlePtyCreate(TcpMessage msg)
+    {
+        TcpMessage response = new TcpMessage();
+        response.setType(TcpMessageType.PTY_CREATE_RESULT);
+        response.setRequestId(msg.getRequestId());
+        response.setAgentId(agentId);
+
+        if (!ptyManager.isRemoteCreateEnabled())
+        {
+            response.setData("远端新建终端已被本地禁用");
+            sendMessage(response, true);
+            return;
+        }
+
+        String name = buildUniqueRemoteTerminalName(msg.getName());
+        int cols = msg.getCols() != null ? msg.getCols() : 120;
+        int rows = msg.getRows() != null ? msg.getRows() : 40;
+
+        try
+        {
+            PtyInstance pty = ptyManager.create(name, cols, rows);
+            pty.startReading();
+            // 远端创建的终端默认开启远端可见，便于直接 attach
+            pty.setRemoteViewable(true);
+
+            response.setData("OK");
+            response.setPtyId(pty.getId());
+            response.setName(pty.getName());
+            response.setRemoteViewable(true);
+            sendMessage(response, true);
+            log.info("远端创建终端成功: id={}, name={}", pty.getId(), pty.getName());
+        }
+        catch (Exception e)
+        {
+            log.error("远端创建终端失败", e);
+            response.setData("创建终端失败: " + e.getMessage());
+            sendMessage(response, true);
+        }
+    }
+
+    private String buildUniqueRemoteTerminalName(String requestedName)
+    {
+        String baseName = requestedName != null ? requestedName.trim() : "";
+        if (baseName.isBlank())
+        {
+            baseName = "终端";
+        }
+
+        String prefix = agentId + "-";
+        String nameWithPrefix = baseName.startsWith(prefix) ? baseName : prefix + baseName;
+
+        var existingNames = ptyManager.getAll().stream()
+                .map(PtyInstance::getName)
+                .filter(Objects::nonNull)
+                .collect(java.util.stream.Collectors.toSet());
+
+        // 处理重名：递增序号（-2, -3, ...）
+        if (!existingNames.contains(nameWithPrefix))
+        {
+            return nameWithPrefix;
+        }
+
+        for (int i = 2; i < 10_000; i++)
+        {
+            String candidate = nameWithPrefix + "-" + i;
+            if (!existingNames.contains(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        // 极端情况下兜底，保证唯一性
+        return nameWithPrefix + "-" + System.currentTimeMillis();
+    }
+
+    private void handlePtyRename(TcpMessage msg)
+    {
+        TcpMessage response = new TcpMessage();
+        response.setType(TcpMessageType.PTY_RENAME_RESULT);
+        response.setRequestId(msg.getRequestId());
+        response.setAgentId(agentId);
+        response.setPtyId(msg.getPtyId());
+
+        if (msg.getPtyId() == null || msg.getPtyId().isBlank())
+        {
+            response.setData("ptyId 不能为空");
+            sendMessage(response, true);
+            return;
+        }
+        if (msg.getName() == null || msg.getName().isBlank())
+        {
+            response.setData("终端名称不能为空");
+            sendMessage(response, true);
+            return;
+        }
+
+        PtyInstance pty = ptyManager.get(msg.getPtyId());
+        if (pty == null)
+        {
+            response.setData("终端不存在");
+            sendMessage(response, true);
+            return;
+        }
+        if (!pty.isRemoteViewable())
+        {
+            response.setData("终端未开启远端可见，禁止远端重命名");
+            sendMessage(response, true);
+            return;
+        }
+
+        pty.setName(msg.getName());
+        response.setData("OK");
+        response.setName(pty.getName());
+        sendMessage(response, true);
+        log.info("远端重命名终端成功: id={}, name={}", msg.getPtyId(), msg.getName());
     }
 
     private void registerVisibilityListeners() {
