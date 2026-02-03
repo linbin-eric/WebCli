@@ -332,7 +332,7 @@
 
             const load = async () => {
                 try {
-                    const response = await fetch('/api/remote-create');
+                    const response = await fetch('/api/remote-create/status');
                     const result = await response.json();
                     if (result.success) {
                         toggle.checked = !!result.data;
@@ -346,7 +346,7 @@
                 const desired = toggle.checked;
                 try {
                     const response = await fetch('/api/remote-create', {
-                        method: 'PUT',
+                        method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ enabled: desired })
                     });
@@ -799,9 +799,8 @@
             });
 
             term.onResize(({ cols, rows }) => {
-                // 固定大尺寸方案：不再发送 resize 消息到服务端
-                // PTY 保持固定尺寸，客户端根据自己的窗口大小显示
-                console.log(`终端尺寸变化: ${cols}x${rows} (仅本地生效)`);
+                this.send({ type: MessageType.PTY_RESIZE, ptyId, cols, rows });
+                console.log(`终端尺寸变化: ${cols}x${rows}`);
             });
 
             this.addTab(ptyId, name);
@@ -852,7 +851,6 @@
                 term.focus();
                 this.currentPtyId = ptyId;
 
-                // 固定大尺寸方案：不再发送 resize 消息
                 console.log(`切换到终端 ${ptyId}，尺寸: ${term.cols}x${term.rows}`);
             }
         }
@@ -887,7 +885,6 @@
                 const term = this.terminals.get(this.currentPtyId);
                 if (fitAddon && term) {
                     fitAddon.fit();
-                    // 固定大尺寸方案：不再发送 resize 消息
                     console.log(`窗口调整，终端尺寸: ${term.cols}x${term.rows}`);
                 }
             }

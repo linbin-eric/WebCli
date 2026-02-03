@@ -149,9 +149,14 @@ public class PtyInstance {
     }
 
     public void resize(int cols, int rows) {
-        // 固定大尺寸方案：忽略客户端的 resize 请求
-        // PTY 保持固定尺寸，每个客户端根据自己的窗口大小显示
-        log.debug("忽略 resize 请求 ({}x{})，PTY 保持固定尺寸 ({}x{})", cols, rows, FIXED_COLS, FIXED_ROWS);
+        int safeCols = Math.max(1, cols);
+        int safeRows = Math.max(1, rows);
+        try {
+            process.setWinSize(new WinSize(safeCols, safeRows));
+            log.debug("PTY resize: {}x{}", safeCols, safeRows);
+        } catch (Exception e) {
+            log.warn("PTY resize 失败: {}x{}", safeCols, safeRows, e);
+        }
     }
 
     public void close() {
