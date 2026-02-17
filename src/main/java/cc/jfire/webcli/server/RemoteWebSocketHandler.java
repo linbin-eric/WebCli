@@ -64,6 +64,14 @@ public class RemoteWebSocketHandler implements ReadProcessor<Object> {
                 sendLoginRequired(pipeline);
                 return;
             }
+            // 检查关联的 Session 是否仍有效（同时刷新活跃时间）
+            if (!loginManager.refreshSessionByPipeline(pipelineId))
+            {
+                // Session 已过期，清除认证状态并通知前端
+                loginManager.removeAuthentication(pipelineId);
+                sendSessionExpired(pipeline);
+                return;
+            }
 
             switch (msg.getType()) {
                 case PTY_INPUT -> handlePtyInput(pipeline, msg);
@@ -107,6 +115,17 @@ public class RemoteWebSocketHandler implements ReadProcessor<Object> {
         WsMessage msg = new WsMessage();
         msg.setType(MessageType.AUTH_FAILED);
         msg.setData("请先登录");
+        sendMessage(pipeline, msg);
+    }
+
+    /**
+     * 发送 Session 已过期的消息
+     */
+    private void sendSessionExpired(Pipeline pipeline)
+    {
+        WsMessage msg = new WsMessage();
+        msg.setType(MessageType.AUTH_FAILED);
+        msg.setData("登录已过期，请重新登录");
         sendMessage(pipeline, msg);
     }
 

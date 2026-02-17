@@ -41,11 +41,6 @@ public class RemoteTerminalController {
         {
             return ApiResponse.error("服务未初始化");
         }
-        String token = getAuthToken(request);
-        if (token == null || !loginManager.validateSession(token))
-        {
-            return ApiResponse.error("未登录或登录已过期");
-        }
         return ApiResponse.ok(agentManager.getAgentIds());
     }
 
@@ -93,11 +88,6 @@ public class RemoteTerminalController {
             return ApiResponse.error("服务未初始化");
         }
 
-        String token = getAuthToken(request);
-        if (token == null || !loginManager.validateSession(token)) {
-            return ApiResponse.error("未登录或登录已过期");
-        }
-
         // 刷新所有 Agent 的 PTY 列表
         agentManager.refreshAllPtyLists();
 
@@ -122,11 +112,6 @@ public class RemoteTerminalController {
         if (agentManager == null)
         {
             return ApiResponse.error("服务未初始化");
-        }
-        String token = getAuthToken(request);
-        if (token == null || !loginManager.validateSession(token))
-        {
-            return ApiResponse.error("未登录或登录已过期");
         }
         if (body == null || body.getAgentId() == null || body.getAgentId().isBlank())
         {
@@ -178,11 +163,6 @@ public class RemoteTerminalController {
             return ApiResponse.error("服务未初始化");
         }
 
-        String token = getAuthToken(request);
-        if (token == null || !loginManager.validateSession(token)) {
-            return ApiResponse.error("未登录或登录已过期");
-        }
-
         String[] parts = agentManager.parseFullPtyId(id);
         if (parts == null) {
             return ApiResponse.error("无效的终端 ID");
@@ -216,11 +196,6 @@ public class RemoteTerminalController {
         if (agentManager == null)
         {
             return ApiResponse.error("服务未初始化");
-        }
-        String token = getAuthToken(request);
-        if (token == null || !loginManager.validateSession(token))
-        {
-            return ApiResponse.error("未登录或登录已过期");
         }
         if (id == null || id.isBlank())
         {
@@ -275,7 +250,22 @@ public class RemoteTerminalController {
             return ApiResponse.error("Method not allowed");
         }
 
-        String token = getAuthToken(request);
+        // 从 Authorization header 获取 token
+        String auth = request.getHeaders() != null ? request.getHeaders().get("Authorization") : null;
+        String token = null;
+        if (auth != null && auth.startsWith("Bearer "))
+        {
+            token = auth.substring(7);
+        }
+        else
+        {
+            // 也支持从 URL 参数获取
+            Object tokenParam = request.getParamMap() != null ? request.getParamMap().get("token") : null;
+            if (tokenParam != null)
+            {
+                token = tokenParam.toString();
+            }
+        }
         if (token == null) {
             return ApiResponse.ok(false);
         }
@@ -302,17 +292,4 @@ public class RemoteTerminalController {
         return address != null ? address : "unknown";
     }
 
-    private String getAuthToken(HttpRequestExtend request) {
-        // 从 Authorization header 获取 token
-        String auth = request.getHeaders() != null ? request.getHeaders().get("Authorization") : null;
-        if (auth != null && auth.startsWith("Bearer ")) {
-            return auth.substring(7);
-        }
-        // 也支持从 URL 参数获取
-        Object tokenParam = request.getParamMap() != null ? request.getParamMap().get("token") : null;
-        if (tokenParam != null) {
-            return tokenParam.toString();
-        }
-        return null;
-    }
 }

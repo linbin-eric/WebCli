@@ -232,6 +232,7 @@
             min-width: 320px;
             box-shadow: 0 4px 16px rgba(0,0,0,0.4);
             z-index: 1001;
+            display: none;
         }
         .login-dialog h3 {
             margin-bottom: 20px;
@@ -294,6 +295,7 @@
             bottom: 0;
             background: rgba(0,0,0,0.7);
             z-index: 1000;
+            display: none;
         }
         /* 创建终端对话框样式 */
         .create-overlay {
@@ -1089,9 +1091,18 @@
         handleAuthFailed(message) {
             this.wsAuthenticated = false;
             this.stopTerminalSync();
-            // token 无效，清除并显示登录对话框
+            // token 无效，清除 token
             this.authToken = null;
             localStorage.removeItem('webcli-auth-token');
+
+            // 如果是登录过期，自动刷新页面
+            if (message && (message.includes('过期') || message.includes('expired'))) {
+                alert('登录已过期，页面将自动刷新');
+                location.reload();
+                return;
+            }
+
+            // 其他情况显示登录对话框
             this.showLoginDialog();
             if (message && message !== '请先登录') {
                 document.getElementById('login-error').textContent = message;

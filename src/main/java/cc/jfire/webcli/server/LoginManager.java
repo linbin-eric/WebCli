@@ -21,7 +21,7 @@ public class LoginManager
 {
     private static final int                        MAX_FAILED_ATTEMPTS    = 5;           // 最大失败次数
     private static final long                       LOCK_DURATION_MS       = 5 * 60 * 1000; // 锁定时长：5分钟
-    private static final long                       SESSION_DURATION_MS    = 24 * 60 * 60 * 1000; // Session 有效期：24小时
+    private static final long                       SESSION_DURATION_MS    = 30 * 60 * 1000; // Session 有效期：30分钟
 
     @Resource
     private              WebCliConfig               config;
@@ -29,6 +29,8 @@ public class LoginManager
     private final        Map<String, FailedAttempt> failedAttempts         = new ConcurrentHashMap<>();
     // 已认证的 Pipeline ID 集合
     private final        Set<String>                authenticatedPipelines = ConcurrentHashMap.newKeySet();
+    // Pipeline ID -> Session token 的映射
+    private final        Map<String, String>        pipelineTokenMap       = new ConcurrentHashMap<>();
     // Session token -> Session 信息
     private final        Map<String, SessionInfo>   sessions               = new ConcurrentHashMap<>();
     private final        SecureRandom               secureRandom           = new SecureRandom();
@@ -159,6 +161,7 @@ public class LoginManager
     public void removeAuthentication(String pipelineId)
     {
         authenticatedPipelines.remove(pipelineId);
+        pipelineTokenMap.remove(pipelineId);
     }
 
     /**
@@ -197,13 +200,16 @@ public class LoginManager
         {
             return false;
         }
-        // 检查是否过期
-        if (System.currentTimeMillis() - session.createTime > SESSION_DURATION_MS)
+        long now = System.currentTimeMillis();
+        // 检查是否过期（从最后活跃时间计算）
+        if (now - session.lastActiveTime() > SESSION_DURATION_MS)
         {
             sessions.remove(token);
             log.info("Session 已过期: token={}", token.substring(0, 8) + "...");
             return false;
         }
+        // 更新最后活跃时间（滑动过期）
+        sessions.put(token, new SessionInfo(session.clientIp(), now));
         return true;
     }
 
@@ -247,9 +253,26 @@ public class LoginManager
         if (validateSession(token))
         {
             authenticatedPipelines.add(pipelineId);
+            pipelineTokenMap.put(pipelineId, token);
             return true;
         }
         return false;
+    }
+
+    /**
+     * 通过 Pipeline ID 刷新关联 Session 的活跃时间
+     *
+     * @param pipelineId Pipeline ID
+     * @return Session 是否仍有效
+     */
+    public boolean refreshSessionByPipeline(String pipelineId)
+    {
+        String token = pipelineTokenMap.get(pipelineId);
+        if (token == null)
+        {
+            return false;
+        }
+        return validateSession(token);
     }
 
     /**
@@ -292,7 +315,7 @@ public class LoginManager
     /**
      * Session 信息
      */
-    public record SessionInfo(String clientIp, long createTime)
+    public record SessionInfo(String clientIp, long lastActiveTime)
     {
     }
 }

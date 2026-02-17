@@ -35,7 +35,7 @@
         <Root level="error">
             <AppenderRef ref="AllFile"/>
         </Root>
-        <Logger name="cc.jfire" level="warn">
+        <Logger name="cc.jfire" level="debug">
             <AppenderRef ref="Console"/>
             <AppenderRef ref="SerAppFile"/>
         </Logger>
