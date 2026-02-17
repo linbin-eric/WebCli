@@ -423,7 +423,7 @@
             });
 
             document.getElementById('btn-resize').addEventListener('click', () => {
-                this.fitTerminal();
+                this.fitTerminal(true);
             });
         }
 
@@ -774,6 +774,9 @@
 
             // 用于跟踪 Shift+Enter 是否刚被处理过
             let skipNextEnterData = false;
+            // 输入合并：将极短时间内的多次 onData 事件合并为一次发送
+            let inputBuffer = '';
+            let inputTimer = null;
 
             term.onData(data => {
                 // 如果刚处理过 Shift+Enter，跳过 onData 产生的回车数据
@@ -782,8 +785,15 @@
                     return;
                 }
                 skipNextEnterData = false;
-                const encoded = btoa(unescape(encodeURIComponent(data)));
-                this.send({ type: MessageType.PTY_INPUT, ptyId, data: encoded });
+                inputBuffer += data;
+                if (inputTimer) clearTimeout(inputTimer);
+                inputTimer = setTimeout(() => {
+                    const toSend = inputBuffer;
+                    inputBuffer = '';
+                    inputTimer = null;
+                    const encoded = btoa(unescape(encodeURIComponent(toSend)));
+                    this.send({ type: MessageType.PTY_INPUT, ptyId, data: encoded });
+                }, 5);
             });
 
             // 自定义按键处理：Shift+Enter 发送与 Alt+Enter 相同的转义序列
@@ -879,12 +889,16 @@
             }
         }
 
-        fitTerminal() {
+        fitTerminal(force = false) {
             if (this.currentPtyId) {
                 const fitAddon = this.fitAddons.get(this.currentPtyId);
                 const term = this.terminals.get(this.currentPtyId);
                 if (fitAddon && term) {
                     fitAddon.fit();
+                    if (force) {
+                        // 强制发送当前尺寸到后端，覆盖可能被远端改变的 PTY winSize
+                        this.send({ type: MessageType.PTY_RESIZE, ptyId: this.currentPtyId, cols: term.cols, rows: term.rows });
+                    }
                     console.log(`窗口调整，终端尺寸: ${term.cols}x${term.rows}`);
                 }
             }

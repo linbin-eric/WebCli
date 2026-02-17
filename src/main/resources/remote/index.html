@@ -1385,9 +1385,20 @@
             this.terminals.set(ptyId, term);
             this.fitAddons.set(ptyId, fitAddon);
 
+            // 输入合并：将极短时间内的多次 onData 事件合并为一次发送
+            let inputBuffer = '';
+            let inputTimer = null;
+
             term.onData(data => {
-                const encoded = btoa(unescape(encodeURIComponent(data)));
-                this.send({ type: MessageType.PTY_INPUT, ptyId, data: encoded });
+                inputBuffer += data;
+                if (inputTimer) clearTimeout(inputTimer);
+                inputTimer = setTimeout(() => {
+                    const toSend = inputBuffer;
+                    inputBuffer = '';
+                    inputTimer = null;
+                    const encoded = btoa(unescape(encodeURIComponent(toSend)));
+                    this.send({ type: MessageType.PTY_INPUT, ptyId, data: encoded });
+                }, 5);
             });
 
             // 自定义按键处理：Shift+Enter 发送换行符

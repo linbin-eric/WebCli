@@ -143,7 +143,7 @@ public class PtyInstance {
         }
     }
 
-    public void write(String input) throws IOException {
+    public synchronized void write(String input) throws IOException {
         outputStream.write(input.getBytes(StandardCharsets.UTF_8));
         outputStream.flush();
     }
