@@ -140,12 +140,48 @@
             position: fixed;
             bottom: 20px;
             right: 20px;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
             z-index: 1000;
         }
-        .shortcuts button {
+        .shortcuts-toggle {
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            background: #0e639c;
+            color: #fff;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s ease;
+        }
+        .shortcuts-toggle:hover {
+            background: #1177bb;
+            transform: scale(1.1);
+        }
+        .shortcuts-toggle:active {
+            background: #0d5a8c;
+            transform: scale(0.95);
+        }
+        .shortcuts-panel {
+            position: absolute;
+            bottom: 70px;
+            right: 0;
+            display: none;
+            flex-direction: column;
+            gap: 8px;
+            opacity: 0;
+            transform: translateY(10px);
+            transition: opacity 0.3s ease, transform 0.3s ease;
+        }
+        .shortcuts-panel.show {
+            display: flex;
+            opacity: 1;
+            transform: translateY(0);
+        }
+        .shortcuts-panel button {
             background: #0e639c;
             color: #fff;
             border: none;
@@ -154,9 +190,10 @@
             font-size: 13px;
             cursor: pointer;
             box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            white-space: nowrap;
         }
-        .shortcuts button:hover { background: #1177bb; }
-        .shortcuts button:active { background: #0d5a8c; }
+        .shortcuts-panel button:hover { background: #1177bb; }
+        .shortcuts-panel button:active { background: #0d5a8c; }
         .arrow-keys {
             display: grid;
             grid-template-columns: repeat(3, 40px);
@@ -171,6 +208,70 @@
         .arrow-keys .arrow-left { grid-column: 1; grid-row: 2; }
         .arrow-keys .arrow-down { grid-column: 2; grid-row: 2; }
         .arrow-keys .arrow-right { grid-column: 3; grid-row: 2; }
+        /* 确认对话框样式 */
+        .confirm-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.7);
+            z-index: 1004;
+            display: none;
+        }
+        .confirm-dialog {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: #2d2d2d;
+            border: 1px solid #404040;
+            border-radius: 8px;
+            padding: 24px;
+            min-width: 360px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+            z-index: 1005;
+            display: none;
+        }
+        .confirm-dialog h3 {
+            margin-bottom: 16px;
+            font-size: 18px;
+            color: #f14c4c;
+            text-align: center;
+        }
+        .confirm-dialog .message {
+            margin-bottom: 20px;
+            font-size: 14px;
+            color: #ccc;
+            line-height: 1.5;
+        }
+        .confirm-dialog .actions {
+            display: flex;
+            gap: 10px;
+        }
+        .confirm-dialog .btn {
+            flex: 1;
+            padding: 10px;
+            background: #0e639c;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        .confirm-dialog .btn:hover { background: #1177bb; }
+        .confirm-dialog .btn.secondary {
+            background: #3c3c3c;
+        }
+        .confirm-dialog .btn.secondary:hover {
+            background: #4c4c4c;
+        }
+        .confirm-dialog .btn.danger {
+            background: #c91b00;
+        }
+        .confirm-dialog .btn.danger:hover {
+            background: #e02010;
+        }
     </style>
 </head>
 <body>
@@ -200,16 +301,32 @@
     <div class="context-menu-item" id="menu-close">关闭终端</div>
 </div>
 <div class="shortcuts">
-    <div class="arrow-keys">
-        <button class="arrow-up" id="btn-arrow-up">↑</button>
-        <button class="arrow-left" id="btn-arrow-left">←</button>
-        <button class="arrow-down" id="btn-arrow-down">↓</button>
-        <button class="arrow-right" id="btn-arrow-right">→</button>
+    <button class="shortcuts-toggle" id="shortcuts-toggle" title="快捷操作">⌨️</button>
+    <div class="shortcuts-panel" id="shortcuts-panel">
+        <div class="arrow-keys">
+            <button class="arrow-up" id="btn-arrow-up">↑</button>
+            <button class="arrow-left" id="btn-arrow-left">←</button>
+            <button class="arrow-down" id="btn-arrow-down">↓</button>
+            <button class="arrow-right" id="btn-arrow-right">→</button>
+        </div>
+        <button id="btn-enter">Enter</button>
+        <button id="btn-shift-enter">Shift+Enter</button>
+        <button id="btn-ctrl-c">Ctrl+C</button>
+        <button id="btn-ctrl-v">Ctrl+V</button>
+        <button id="btn-resize">Resize</button>
     </div>
-    <button id="btn-enter">Shift+Enter</button>
-    <button id="btn-ctrl-c">Ctrl+C</button>
-    <button id="btn-ctrl-v">Ctrl+V</button>
-    <button id="btn-resize">Resize</button>
+</div>
+
+<!-- 确认对话框 -->
+<div class="confirm-overlay" id="confirm-overlay"></div>
+<div class="confirm-dialog" id="confirm-dialog">
+    <h3>确认关闭终端</h3>
+    <div class="message" id="confirm-message"></div>
+    <div class="actions">
+        <button class="btn secondary" id="btn-confirm-cancel">取消</button>
+        <button class="btn" id="btn-confirm-local">仅关闭本地</button>
+        <button class="btn danger" id="btn-confirm-both">同时关闭</button>
+    </div>
 </div>
 
 <script src="lib/xterm.min.js"></script>
@@ -285,6 +402,7 @@
             this.fitAddons = new Map();
             this.terminalNames = new Map();
             this.terminalRemoteViewable = new Map();
+            this.terminalRemoteCreated = new Map();
             this.currentPtyId = null;
             this.nextTerminalNumber = 1;
             this.contextMenuPtyId = null;
@@ -300,6 +418,7 @@
             this.initShortcuts();
             this.initThemeSelector();
             this.initRemoteCreateToggle();
+            this.initConfirmDialog();
 
             document.getElementById('btn-new').addEventListener('click', () => this.createPty());
             window.addEventListener('resize', () => this.fitTerminal());
@@ -367,7 +486,85 @@
             load();
         }
 
+        initConfirmDialog() {
+            const overlay = document.getElementById('confirm-overlay');
+            const dialog = document.getElementById('confirm-dialog');
+            const cancelBtn = document.getElementById('btn-confirm-cancel');
+            const localBtn = document.getElementById('btn-confirm-local');
+            const bothBtn = document.getElementById('btn-confirm-both');
+
+            let currentPtyId = null;
+            let resolveCallback = null;
+
+            const hideDialog = () => {
+                overlay.style.display = 'none';
+                dialog.style.display = 'none';
+                currentPtyId = null;
+                resolveCallback = null;
+            };
+
+            overlay.addEventListener('click', () => {
+                if (resolveCallback) resolveCallback('cancel');
+                hideDialog();
+            });
+
+            cancelBtn.addEventListener('click', () => {
+                if (resolveCallback) resolveCallback('cancel');
+                hideDialog();
+            });
+
+            localBtn.addEventListener('click', () => {
+                if (resolveCallback) resolveCallback('local');
+                hideDialog();
+            });
+
+            bothBtn.addEventListener('click', () => {
+                if (resolveCallback) resolveCallback('both');
+                hideDialog();
+            });
+
+            this.showConfirmDialog = (ptyId, name) => {
+                return new Promise((resolve) => {
+                    currentPtyId = ptyId;
+                    resolveCallback = resolve;
+                    document.getElementById('confirm-message').textContent =
+                        `终端 "${name}" 是由远端创建的。您希望如何关闭？`;
+                    overlay.style.display = 'block';
+                    dialog.style.display = 'block';
+                });
+            };
+        }
+
         initShortcuts() {
+            let hideTimer = null;
+            const panel = document.getElementById('shortcuts-panel');
+            const toggle = document.getElementById('shortcuts-toggle');
+
+            const resetHideTimer = () => {
+                if (hideTimer) clearTimeout(hideTimer);
+                hideTimer = setTimeout(() => {
+                    panel.classList.remove('show');
+                }, 15000);
+            };
+
+            toggle.addEventListener('click', () => {
+                const isShown = panel.classList.contains('show');
+                if (isShown) {
+                    panel.classList.remove('show');
+                    if (hideTimer) clearTimeout(hideTimer);
+                } else {
+                    panel.classList.add('show');
+                    resetHideTimer();
+                }
+            });
+
+            // 点击面板内的按钮时重置计时器
+            panel.addEventListener('click', (e) => {
+                if (e.target.tagName === 'BUTTON') {
+                    resetHideTimer();
+                }
+            });
+
             document.getElementById('btn-arrow-up').addEventListener('click', () => {
                 if (this.currentPtyId) {
                     const encoded = btoa('\x1b[A');
@@ -397,6 +594,13 @@
             });
 
             document.getElementById('btn-enter').addEventListener('click', () => {
+                if (this.currentPtyId) {
+                    const encoded = btoa('\r');
+                    this.send({ type: MessageType.PTY_INPUT, ptyId: this.currentPtyId, data: encoded });
+                }
+            });
+
+            document.getElementById('btn-shift-enter').addEventListener('click', () => {
                 if (this.currentPtyId) {
                     const encoded = btoa('\n');
                     this.send({ type: MessageType.PTY_INPUT, ptyId: this.currentPtyId, data: encoded });
@@ -614,9 +818,11 @@
 
                 const name = ptyInfo.name || ptyId;
                 const remoteViewable = !!ptyInfo.remoteViewable;
+                const remoteCreated = !!ptyInfo.remoteCreated;
 
                 if (!this.terminals.has(ptyId)) {
                     this.terminalRemoteViewable.set(ptyId, remoteViewable);
+                    this.terminalRemoteCreated.set(ptyId, remoteCreated);
                     const shouldSwitch = this.terminals.size === 0;
                     this.attachPty(ptyId, name, shouldSwitch);
                     continue;
@@ -629,6 +835,9 @@
                 if ((this.terminalRemoteViewable.get(ptyId) || false) !== remoteViewable) {
                     this.terminalRemoteViewable.set(ptyId, remoteViewable);
                     this.updateTab(ptyId);
+                }
+                if ((this.terminalRemoteCreated.get(ptyId) || false) !== remoteCreated) {
+                    this.terminalRemoteCreated.set(ptyId, remoteCreated);
                 }
             }
 
@@ -646,6 +855,7 @@
             this.fitAddons.delete(ptyId);
             this.terminalNames.delete(ptyId);
             this.terminalRemoteViewable.delete(ptyId);
+            this.terminalRemoteCreated.delete(ptyId);
             document.querySelector(`.tab[data-pty-id="${ptyId}"]`)?.remove();
 
             if (this.currentPtyId === ptyId) {
@@ -703,6 +913,7 @@
                 list.forEach((ptyInfo, index) => {
                     if (ptyInfo.alive) {
                         this.terminalRemoteViewable.set(ptyInfo.id, ptyInfo.remoteViewable || false);
+                        this.terminalRemoteCreated.set(ptyInfo.id, ptyInfo.remoteCreated || false);
                         this.attachPty(ptyInfo.id, ptyInfo.name, index === 0);
                     }
                 });
@@ -740,6 +951,7 @@
                 if (result.success && result.data) {
                     const ptyInfo = result.data;
                     this.terminalRemoteViewable.set(ptyInfo.id, ptyInfo.remoteViewable || false);
+                    this.terminalRemoteCreated.set(ptyInfo.id, ptyInfo.remoteCreated || false);
                     this.addTerminal(ptyInfo.id, ptyInfo.name, true);
                     this.send({ type: MessageType.PTY_ATTACH, ptyId: ptyInfo.id });
                     this.updateNextTerminalNumber();
@@ -833,6 +1045,7 @@
 
             tab.addEventListener('click', (e) => {
                 if (e.target.classList.contains('close')) {
+                    e.stopPropagation();
                     this.closePty(ptyId);
                 } else {
                     this.switchTerminal(ptyId);
@@ -865,7 +1078,46 @@
             }
         }
 
-        closePty(ptyId) {
+        async closePty(ptyId) {
+            const isRemoteCreated = this.terminalRemoteCreated.get(ptyId) || false;
+            const name = this.terminalNames.get(ptyId) || ptyId;
+
+            if (isRemoteCreated) {
+                const choice = await this.showConfirmDialog(ptyId, name);
+                if (choice === 'cancel') {
+                    return;
+                }
+                if (choice === 'both') {
+                    // 同时关闭本地和远端
+                    await this.closeTerminalBoth(ptyId);
+                } else {
+                    // 仅关闭本地
+                    await this.closeTerminalLocal(ptyId);
+                }
+            } else {
+                // 非远端创建的终端，直接关闭
+                await this.closeTerminalBoth(ptyId);
+            }
+        }
+
+        async closeTerminalLocal(ptyId) {
+            // 仅清理本地 UI，不调用后端 API
+            this.terminals.get(ptyId)?.dispose();
+            this.terminals.delete(ptyId);
+            this.fitAddons.delete(ptyId);
+            this.terminalNames.delete(ptyId);
+            this.terminalRemoteViewable.delete(ptyId);
+            this.terminalRemoteCreated.delete(ptyId);
+
+            document.querySelector(`.tab[data-pty-id="${ptyId}"]`)?.remove();
+
+            if (this.currentPtyId === ptyId) {
+                const firstPty = this.terminals.keys().next().value;
+                if (firstPty) this.switchTerminal(firstPty);
+            }
+        }
+
+        async closeTerminalBoth(ptyId) {
             fetch(`/api/terminal/${ptyId}`, { method: 'DELETE' })
                 .then(response => response.json())
                 .then(result => {
@@ -880,6 +1132,7 @@
             this.fitAddons.delete(ptyId);
             this.terminalNames.delete(ptyId);
             this.terminalRemoteViewable.delete(ptyId);
+            this.terminalRemoteCreated.delete(ptyId);
 
             document.querySelector(`.tab[data-pty-id="${ptyId}"]`)?.remove();
 

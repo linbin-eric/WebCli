@@ -216,7 +216,7 @@ public class ServerTcpHandler implements ReadProcessor<IoBuffer> {
         {
             if (msg.getType() == TcpMessageType.PTY_CREATE_RESULT && msg.getPtyId() != null && msg.getName() != null)
             {
-                agentManager.upsertPty(agentId, msg.getPtyId(), msg.getName(), true, true);
+                agentManager.upsertPty(agentId, msg.getPtyId(), msg.getName(), true, true, true);
             }
             if (msg.getType() == TcpMessageType.PTY_RENAME_RESULT && msg.getPtyId() != null && msg.getName() != null)
             {

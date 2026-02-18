@@ -34,6 +34,7 @@ public class PtyInstance {
     private final List<Consumer<String>> outputListeners = new CopyOnWriteArrayList<>();
     private final List<BiConsumer<String, Boolean>> visibilityChangeListeners = new CopyOnWriteArrayList<>();
     private volatile boolean remoteViewable = false;
+    private volatile boolean remoteCreated = false;
     private Thread readThread;
 
     // 固定的 PTY 尺寸，足够大以适应大多数屏幕
@@ -176,5 +177,9 @@ public class PtyInstance {
 
     public void setName(String name) {
         this.name = name;
+    }
+
+    public void setRemoteCreated(boolean remoteCreated) {
+        this.remoteCreated = remoteCreated;
     }
 }

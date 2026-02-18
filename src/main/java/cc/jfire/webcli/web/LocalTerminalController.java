@@ -39,7 +39,7 @@ public class LocalTerminalController {
             return ApiResponse.ok(Collections.emptyList());
         }
         List<PtyInfo> list = ptyManager.getAll().stream()
-                .map(pty -> new PtyInfo(pty.getId(), pty.getName(), pty.isAlive(), pty.isRemoteViewable()))
+                .map(pty -> new PtyInfo(pty.getId(), pty.getName(), pty.isAlive(), pty.isRemoteViewable(), pty.isRemoteCreated()))
                 .toList();
         return ApiResponse.ok(list);
     }
@@ -62,7 +62,7 @@ public class LocalTerminalController {
             int rows = body != null && body.getRows() != null ? body.getRows() : 40;
             PtyInstance pty = ptyManager.create(name, cols, rows);
             pty.startReading();
-            PtyInfo info = new PtyInfo(pty.getId(), pty.getName(), pty.isAlive(), pty.isRemoteViewable());
+            PtyInfo info = new PtyInfo(pty.getId(), pty.getName(), pty.isAlive(), pty.isRemoteViewable(), pty.isRemoteCreated());
             log.info("通过 HTTP API 创建终端: {}, 名称: {}", pty.getId(), name);
             return ApiResponse.ok(info);
         } catch (IOException e) {
@@ -117,7 +117,7 @@ public class LocalTerminalController {
             return ApiResponse.error("终端名称不能为空");
         }
         pty.setName(body.getName());
-        PtyInfo info = new PtyInfo(pty.getId(), pty.getName(), pty.isAlive(), pty.isRemoteViewable());
+        PtyInfo info = new PtyInfo(pty.getId(), pty.getName(), pty.isAlive(), pty.isRemoteViewable(), pty.isRemoteCreated());
         log.info("通过 HTTP API 重命名终端: {} -> {}", id, body.getName());
         return ApiResponse.ok(info);
     }
@@ -140,7 +140,7 @@ public class LocalTerminalController {
         }
         boolean remoteViewable = body != null && body.getRemoteViewable() != null && body.getRemoteViewable();
         pty.setRemoteViewable(remoteViewable);
-        PtyInfo info = new PtyInfo(pty.getId(), pty.getName(), pty.isAlive(), pty.isRemoteViewable());
+        PtyInfo info = new PtyInfo(pty.getId(), pty.getName(), pty.isAlive(), pty.isRemoteViewable(), pty.isRemoteCreated());
         log.info("通过 HTTP API 设置终端 {} 远程可见: {}", id, remoteViewable);
         return ApiResponse.ok(info);
     }

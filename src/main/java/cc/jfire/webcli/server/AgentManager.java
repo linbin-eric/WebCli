@@ -86,7 +86,7 @@ public class AgentManager
             for (PtyInfo pty : entry.getValue())
             {
                 // 创建新的 PtyInfo，ID 前缀加上 agentId
-                PtyInfo remotePty = new PtyInfo(agentId + ":" + pty.getId(), pty.getName(), pty.isAlive(), pty.isRemoteViewable());
+                PtyInfo remotePty = new PtyInfo(agentId + ":" + pty.getId(), pty.getName(), pty.isAlive(), pty.isRemoteViewable(), pty.isRemoteCreated());
                 result.add(remotePty);
             }
         }
@@ -201,6 +201,11 @@ public class AgentManager
 
     public void upsertPty(String agentId, String ptyId, String name, boolean alive, boolean remoteViewable)
     {
+        upsertPty(agentId, ptyId, name, alive, remoteViewable, false);
+    }
+
+    public void upsertPty(String agentId, String ptyId, String name, boolean alive, boolean remoteViewable, boolean remoteCreated)
+    {
         agentPtyLists.compute(agentId, (k, oldList) -> {
             List<PtyInfo> list = oldList != null ? new ArrayList<>(oldList) : new ArrayList<>();
             boolean found = false;
@@ -212,13 +217,14 @@ public class AgentManager
                     existing.setName(name);
                     existing.setAlive(alive);
                     existing.setRemoteViewable(remoteViewable);
+                    existing.setRemoteCreated(remoteCreated);
                     found = true;
                     break;
                 }
             }
             if (!found)
             {
-                list.add(new PtyInfo(ptyId, name, alive, remoteViewable));
+                list.add(new PtyInfo(ptyId, name, alive, remoteViewable, remoteCreated));
             }
             return list;
         });

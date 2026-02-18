@@ -188,12 +188,48 @@
             position: fixed;
             bottom: 20px;
             right: 20px;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
             z-index: 1000;
         }
-        .shortcuts button {
+        .shortcuts-toggle {
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            background: #0e639c;
+            color: #fff;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s ease;
+        }
+        .shortcuts-toggle:hover {
+            background: #1177bb;
+            transform: scale(1.1);
+        }
+        .shortcuts-toggle:active {
+            background: #0d5a8c;
+            transform: scale(0.95);
+        }
+        .shortcuts-panel {
+            position: absolute;
+            bottom: 70px;
+            right: 0;
+            display: none;
+            flex-direction: column;
+            gap: 8px;
+            opacity: 0;
+            transform: translateY(10px);
+            transition: opacity 0.3s ease, transform 0.3s ease;
+        }
+        .shortcuts-panel.show {
+            display: flex;
+            opacity: 1;
+            transform: translateY(0);
+        }
+        .shortcuts-panel button {
             background: #0e639c;
             color: #fff;
             border: none;
@@ -202,9 +238,10 @@
             font-size: 13px;
             cursor: pointer;
             box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            white-space: nowrap;
         }
-        .shortcuts button:hover { background: #1177bb; }
-        .shortcuts button:active { background: #0d5a8c; }
+        .shortcuts-panel button:hover { background: #1177bb; }
+        .shortcuts-panel button:active { background: #0d5a8c; }
         .arrow-keys {
             display: grid;
             grid-template-columns: repeat(3, 40px);
@@ -439,16 +476,20 @@
     <div class="error-msg" id="login-error"></div>
 </div>
 <div class="shortcuts">
-    <div class="arrow-keys">
-        <button class="arrow-up" id="btn-arrow-up">↑</button>
-        <button class="arrow-left" id="btn-arrow-left">←</button>
-        <button class="arrow-down" id="btn-arrow-down">↓</button>
-        <button class="arrow-right" id="btn-arrow-right">→</button>
+    <button class="shortcuts-toggle" id="shortcuts-toggle" title="快捷操作">⌨️</button>
+    <div class="shortcuts-panel" id="shortcuts-panel">
+        <div class="arrow-keys">
+            <button class="arrow-up" id="btn-arrow-up">↑</button>
+            <button class="arrow-left" id="btn-arrow-left">←</button>
+            <button class="arrow-down" id="btn-arrow-down">↓</button>
+            <button class="arrow-right" id="btn-arrow-right">→</button>
+        </div>
+        <button id="btn-enter">Enter</button>
+        <button id="btn-shift-enter">Shift+Enter</button>
+        <button id="btn-ctrl-c">Ctrl+C</button>
+        <button id="btn-ctrl-v">Ctrl+V</button>
+        <button id="btn-resize">Resize</button>
     </div>
-    <button id="btn-enter">Shift+Enter</button>
-    <button id="btn-ctrl-c">Ctrl+C</button>
-    <button id="btn-ctrl-v">Ctrl+V</button>
-    <button id="btn-resize">Resize</button>
 </div>
 
 <script src="lib/xterm.min.js"></script>
@@ -915,6 +956,35 @@
         }
 
         initShortcuts() {
+            let hideTimer = null;
+            const panel = document.getElementById('shortcuts-panel');
+            const toggle = document.getElementById('shortcuts-toggle');
+
+            const resetHideTimer = () => {
+                if (hideTimer) clearTimeout(hideTimer);
+                hideTimer = setTimeout(() => {
+                    panel.classList.remove('show');
+                }, 15000);
+            };
+
+            toggle.addEventListener('click', () => {
+                const isShown = panel.classList.contains('show');
+                if (isShown) {
+                    panel.classList.remove('show');
+                    if (hideTimer) clearTimeout(hideTimer);
+                } else {
+                    panel.classList.add('show');
+                    resetHideTimer();
+                }
+            });
+
+            // 点击面板内的按钮时重置计时器
+            panel.addEventListener('click', (e) => {
+                if (e.target.tagName === 'BUTTON') {
+                    resetHideTimer();
+                }
+            });
+
             document.getElementById('btn-arrow-up').addEventListener('click', () => {
                 if (this.currentPtyId) {
                     const encoded = btoa('\x1b[A');
@@ -944,6 +1014,13 @@
             });
 
             document.getElementById('btn-enter').addEventListener('click', () => {
+                if (this.currentPtyId) {
+                    const encoded = btoa('\r');
+                    this.send({ type: MessageType.PTY_INPUT, ptyId: this.currentPtyId, data: encoded });
+                }
+            });
+
+            document.getElementById('btn-shift-enter').addEventListener('click', () => {
                 if (this.currentPtyId) {
                     const encoded = btoa('\n');
                     this.send({ type: MessageType.PTY_INPUT, ptyId: this.currentPtyId, data: encoded });

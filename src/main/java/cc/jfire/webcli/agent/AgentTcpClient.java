@@ -353,6 +353,8 @@ public class AgentTcpClient implements ReadProcessor<IoBuffer> {
             pty.startReading();
             // 远端创建的终端默认开启远端可见，便于直接 attach
             pty.setRemoteViewable(true);
+            // 标记为远端创建
+            pty.setRemoteCreated(true);
 
             response.setData("OK");
             response.setPtyId(pty.getId());
