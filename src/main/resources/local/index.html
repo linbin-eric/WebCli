@@ -208,70 +208,6 @@
         .arrow-keys .arrow-left { grid-column: 1; grid-row: 2; }
         .arrow-keys .arrow-down { grid-column: 2; grid-row: 2; }
         .arrow-keys .arrow-right { grid-column: 3; grid-row: 2; }
-        /* 确认对话框样式 */
-        .confirm-overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: rgba(0,0,0,0.7);
-            z-index: 1004;
-            display: none;
-        }
-        .confirm-dialog {
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            background: #2d2d2d;
-            border: 1px solid #404040;
-            border-radius: 8px;
-            padding: 24px;
-            min-width: 360px;
-            box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-            z-index: 1005;
-            display: none;
-        }
-        .confirm-dialog h3 {
-            margin-bottom: 16px;
-            font-size: 18px;
-            color: #f14c4c;
-            text-align: center;
-        }
-        .confirm-dialog .message {
-            margin-bottom: 20px;
-            font-size: 14px;
-            color: #ccc;
-            line-height: 1.5;
-        }
-        .confirm-dialog .actions {
-            display: flex;
-            gap: 10px;
-        }
-        .confirm-dialog .btn {
-            flex: 1;
-            padding: 10px;
-            background: #0e639c;
-            color: #fff;
-            border: none;
-            border-radius: 4px;
-            font-size: 14px;
-            cursor: pointer;
-        }
-        .confirm-dialog .btn:hover { background: #1177bb; }
-        .confirm-dialog .btn.secondary {
-            background: #3c3c3c;
-        }
-        .confirm-dialog .btn.secondary:hover {
-            background: #4c4c4c;
-        }
-        .confirm-dialog .btn.danger {
-            background: #c91b00;
-        }
-        .confirm-dialog .btn.danger:hover {
-            background: #e02010;
-        }
     </style>
 </head>
 <body>
@@ -314,18 +250,6 @@
         <button id="btn-ctrl-c">Ctrl+C</button>
         <button id="btn-ctrl-v">Ctrl+V</button>
         <button id="btn-resize">Resize</button>
-    </div>
-</div>
-
-<!-- 确认对话框 -->
-<div class="confirm-overlay" id="confirm-overlay"></div>
-<div class="confirm-dialog" id="confirm-dialog">
-    <h3>确认关闭终端</h3>
-    <div class="message" id="confirm-message"></div>
-    <div class="actions">
-        <button class="btn secondary" id="btn-confirm-cancel">取消</button>
-        <button class="btn" id="btn-confirm-local">仅关闭本地</button>
-        <button class="btn danger" id="btn-confirm-both">同时关闭</button>
     </div>
 </div>
 
@@ -418,7 +342,6 @@
             this.initShortcuts();
             this.initThemeSelector();
             this.initRemoteCreateToggle();
-            this.initConfirmDialog();
 
             document.getElementById('btn-new').addEventListener('click', () => this.createPty());
             window.addEventListener('resize', () => this.fitTerminal());
@@ -484,55 +407,6 @@
             });
 
             load();
-        }
-
-        initConfirmDialog() {
-            const overlay = document.getElementById('confirm-overlay');
-            const dialog = document.getElementById('confirm-dialog');
-            const cancelBtn = document.getElementById('btn-confirm-cancel');
-            const localBtn = document.getElementById('btn-confirm-local');
-            const bothBtn = document.getElementById('btn-confirm-both');
-
-            let currentPtyId = null;
-            let resolveCallback = null;
-
-            const hideDialog = () => {
-                overlay.style.display = 'none';
-                dialog.style.display = 'none';
-                currentPtyId = null;
-                resolveCallback = null;
-            };
-
-            overlay.addEventListener('click', () => {
-                if (resolveCallback) resolveCallback('cancel');
-                hideDialog();
-            });
-
-            cancelBtn.addEventListener('click', () => {
-                if (resolveCallback) resolveCallback('cancel');
-                hideDialog();
-            });
-
-            localBtn.addEventListener('click', () => {
-                if (resolveCallback) resolveCallback('local');
-                hideDialog();
-            });
-
-            bothBtn.addEventListener('click', () => {
-                if (resolveCallback) resolveCallback('both');
-                hideDialog();
-            });
-
-            this.showConfirmDialog = (ptyId, name) => {
-                return new Promise((resolve) => {
-                    currentPtyId = ptyId;
-                    resolveCallback = resolve;
-                    document.getElementById('confirm-message').textContent =
-                        `终端 "${name}" 是由远端创建的。您希望如何关闭？`;
-                    overlay.style.display = 'block';
-                    dialog.style.display = 'block';
-                });
-            };
         }
 
         initShortcuts() {
@@ -1079,42 +953,8 @@
         }
 
         async closePty(ptyId) {
-            const isRemoteCreated = this.terminalRemoteCreated.get(ptyId) || false;
-            const name = this.terminalNames.get(ptyId) || ptyId;
-
-            if (isRemoteCreated) {
-                const choice = await this.showConfirmDialog(ptyId, name);
-                if (choice === 'cancel') {
-                    return;
-                }
-                if (choice === 'both') {
-                    // 同时关闭本地和远端
-                    await this.closeTerminalBoth(ptyId);
-                } else {
-                    // 仅关闭本地
-                    await this.closeTerminalLocal(ptyId);
-                }
-            } else {
-                // 非远端创建的终端，直接关闭
-                await this.closeTerminalBoth(ptyId);
-            }
-        }
-
-        async closeTerminalLocal(ptyId) {
-            // 仅清理本地 UI，不调用后端 API
-            this.terminals.get(ptyId)?.dispose();
-            this.terminals.delete(ptyId);
-            this.fitAddons.delete(ptyId);
-            this.terminalNames.delete(ptyId);
-            this.terminalRemoteViewable.delete(ptyId);
-            this.terminalRemoteCreated.delete(ptyId);
-
-            document.querySelector(`.tab[data-pty-id="${ptyId}"]`)?.remove();
-
-            if (this.currentPtyId === ptyId) {
-                const firstPty = this.terminals.keys().next().value;
-                if (firstPty) this.switchTerminal(firstPty);
-            }
+            // 本地端直接关闭终端，不需要确认
+            await this.closeTerminalBoth(ptyId);
         }
 
         async closeTerminalBoth(ptyId) {

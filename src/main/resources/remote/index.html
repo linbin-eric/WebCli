@@ -334,6 +334,70 @@
             z-index: 1000;
             display: none;
         }
+        /* 关闭确认对话框样式 */
+        .close-confirm-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.7);
+            z-index: 1004;
+            display: none;
+        }
+        .close-confirm-dialog {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: #2d2d2d;
+            border: 1px solid #404040;
+            border-radius: 8px;
+            padding: 24px;
+            min-width: 400px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+            z-index: 1005;
+            display: none;
+        }
+        .close-confirm-dialog h3 {
+            margin-bottom: 16px;
+            font-size: 18px;
+            color: #4ec9b0;
+            text-align: center;
+        }
+        .close-confirm-dialog .message {
+            margin-bottom: 20px;
+            font-size: 14px;
+            color: #ccc;
+            line-height: 1.5;
+        }
+        .close-confirm-dialog .actions {
+            display: flex;
+            gap: 10px;
+        }
+        .close-confirm-dialog .btn {
+            flex: 1;
+            padding: 10px;
+            background: #0e639c;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        .close-confirm-dialog .btn:hover { background: #1177bb; }
+        .close-confirm-dialog .btn.secondary {
+            background: #3c3c3c;
+        }
+        .close-confirm-dialog .btn.secondary:hover {
+            background: #4c4c4c;
+        }
+        .close-confirm-dialog .btn.danger {
+            background: #c91b00;
+        }
+        .close-confirm-dialog .btn.danger:hover {
+            background: #e02000;
+        }
         /* 创建终端对话框样式 */
         .create-overlay {
             position: fixed;
@@ -475,6 +539,17 @@
     <button class="login-btn" id="btn-login">登录</button>
     <div class="error-msg" id="login-error"></div>
 </div>
+<!-- 关闭确认对话框 -->
+<div class="close-confirm-overlay" id="close-confirm-overlay"></div>
+<div class="close-confirm-dialog" id="close-confirm-dialog">
+    <h3>关闭终端</h3>
+    <div class="message" id="close-confirm-message"></div>
+    <div class="actions">
+        <button class="btn secondary" id="btn-close-cancel">取消</button>
+        <button class="btn" id="btn-close-local">仅关闭远端</button>
+        <button class="btn danger" id="btn-close-both">同时关闭后端</button>
+    </div>
+</div>
 <div class="shortcuts">
     <button class="shortcuts-toggle" id="shortcuts-toggle" title="快捷操作">⌨️</button>
     <div class="shortcuts-panel" id="shortcuts-panel">
@@ -568,6 +643,7 @@
             this.terminals = new Map();
             this.fitAddons = new Map();
             this.terminalNames = new Map();
+            this.terminalRemoteCreated = new Map(); // 追踪哪些终端是远端创建的
             this.currentPtyId = null;
             this.currentTheme = localStorage.getItem('webcli-theme') || 'dark';
             this.authToken = localStorage.getItem('webcli-auth-token') || null;
@@ -583,6 +659,7 @@
             this.initThemeSelector();
             this.initLogin();
             this.initCreateDialog();
+            this.initCloseConfirmDialog();
 
             document.getElementById('btn-connect').addEventListener('click', () => this.showPtyList());
             document.getElementById('btn-new').addEventListener('click', () => this.showCreateDialog());
@@ -631,6 +708,37 @@
             nameInput.addEventListener('keypress', (e) => {
                 if (e.key === 'Enter') this.doCreateTerminal();
             });
+        }
+
+        initCloseConfirmDialog() {
+            const overlay = document.getElementById('close-confirm-overlay');
+            const cancelBtn = document.getElementById('btn-close-cancel');
+            const localBtn = document.getElementById('btn-close-local');
+            const bothBtn = document.getElementById('btn-close-both');
+
+            this.showCloseConfirmDialog = (ptyId, name) => {
+                return new Promise((resolve) => {
+                    document.getElementById('close-confirm-message').textContent =
+                        `终端 "${name}" 是由远端创建的。您希望如何关闭？`;
+                    overlay.style.display = 'block';
+                    document.getElementById('close-confirm-dialog').style.display = 'block';
+
+                    const handleChoice = (choice) => {
+                        overlay.style.display = 'none';
+                        document.getElementById('close-confirm-dialog').style.display = 'none';
+                        resolve(choice);
+                    };
+
+                    const cancelHandler = () => handleChoice('cancel');
+                    const localHandler = () => handleChoice('local');
+                    const bothHandler = () => handleChoice('both');
+
+                    cancelBtn.onclick = cancelHandler;
+                    localBtn.onclick = localHandler;
+                    bothBtn.onclick = bothHandler;
+                    overlay.onclick = cancelHandler;
+                });
+            };
         }
 
         async showCreateDialog() {
@@ -720,6 +828,7 @@
                 });
                 const result = await response.json();
                 if (result.success && result.data) {
+                    this.terminalRemoteCreated.set(result.data.id, true); // 标记为远端创建
                     this.attachPty(result.data.id, result.data.name);
                     this.hideCreateDialog();
                 } else {
@@ -1221,7 +1330,21 @@
                     // 自动清理已不存在/已退出的终端
                     for (const ptyId of Array.from(this.terminals.keys())) {
                         if (!available.has(ptyId)) {
-                            this.closePty(ptyId);
+                            // 自动清理时直接清理本地 UI，不弹确认框
+                            this.terminals.get(ptyId)?.dispose();
+                            this.terminals.delete(ptyId);
+                            this.fitAddons.delete(ptyId);
+                            this.terminalNames.delete(ptyId);
+                            this.terminalRemoteCreated.delete(ptyId);
+                            document.querySelector(`.tab[data-pty-id="${ptyId}"]`)?.remove();
+                            if (this.currentPtyId === ptyId) {
+                                const firstPty = this.terminals.keys().next().value;
+                                if (firstPty) {
+                                    this.switchTerminal(firstPty);
+                                } else {
+                                    this.currentPtyId = null;
+                                }
+                            }
                         }
                     }
                     return;
@@ -1242,6 +1365,7 @@
             this.terminals.delete(ptyId);
             this.fitAddons.delete(ptyId);
             this.terminalNames.delete(ptyId);
+            this.terminalRemoteCreated.delete(ptyId);
 
             document.querySelector(`.tab[data-pty-id="${ptyId}"]`)?.remove();
 
@@ -1541,12 +1665,83 @@
         }
 
         closePty(ptyId) {
-            // 发送 DETACH 而不是 CLOSE，只断开远端连接，不关闭本地 PTY
+            const isRemoteCreated = this.terminalRemoteCreated.get(ptyId) || false;
+            const name = this.terminalNames.get(ptyId) || ptyId;
+
+            if (isRemoteCreated) {
+                // 远端创建的终端，显示确认对话框
+                this.showCloseConfirmDialog(ptyId, name).then(choice => {
+                    if (choice === 'cancel') {
+                        return;
+                    }
+                    if (choice === 'both') {
+                        // 同时关闭本地和远端
+                        this.closeTerminalBoth(ptyId);
+                    } else {
+                        // 仅关闭远端
+                        this.closeTerminalLocal(ptyId);
+                    }
+                });
+            } else {
+                // 非远端创建的终端，直接断开连接
+                this.closeTerminalLocal(ptyId);
+            }
+        }
+
+        closeTerminalLocal(ptyId) {
+            // 发送 DETACH 断开远端连接，不关闭本地 PTY
             this.send({ type: MessageType.PTY_DETACH, ptyId });
             this.terminals.get(ptyId)?.dispose();
             this.terminals.delete(ptyId);
             this.fitAddons.delete(ptyId);
             this.terminalNames.delete(ptyId);
+            this.terminalRemoteCreated.delete(ptyId);
+
+            document.querySelector(`.tab[data-pty-id="${ptyId}"]`)?.remove();
+
+            if (this.currentPtyId === ptyId) {
+                const firstPty = this.terminals.keys().next().value;
+                if (firstPty) {
+                    this.switchTerminal(firstPty);
+                } else {
+                    this.currentPtyId = null;
+                }
+            }
+        }
+
+        async closeTerminalBoth(ptyId) {
+            if (!this.authToken) {
+                this.showLoginDialog();
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/remote/terminal/${ptyId}`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${this.authToken}` }
+                });
+                const result = await response.json();
+                if (!result.success) {
+                    console.error('关闭终端失败:', result.message);
+                    if (result.message && result.message.includes('未登录')) {
+                        this.authToken = null;
+                        localStorage.removeItem('webcli-auth-token');
+                        this.showLoginDialog();
+                    } else {
+                        alert('关闭终端失败: ' + result.message);
+                    }
+                }
+            } catch (e) {
+                console.error('关闭终端失败:', e);
+                alert('关闭终端失败');
+            }
+
+            // 清理本地 UI
+            this.terminals.get(ptyId)?.dispose();
+            this.terminals.delete(ptyId);
+            this.fitAddons.delete(ptyId);
+            this.terminalNames.delete(ptyId);
+            this.terminalRemoteCreated.delete(ptyId);
 
             document.querySelector(`.tab[data-pty-id="${ptyId}"]`)?.remove();
 
