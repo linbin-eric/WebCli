@@ -21,9 +21,9 @@ import java.util.function.Consumer;
 @Slf4j
 public class WebSocketHandler implements ReadProcessor<Object>
 {
-    private final PtyManager                                    ptyManager;
-    private final ConcurrentHashMap<String, String>             pipelinePtyMap         = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, Consumer<String>>   pipelineOutputListeners = new ConcurrentHashMap<>();
+    private final PtyManager                                                      ptyManager;
+    private final ConcurrentHashMap<String, String>                               pipelinePtyMap          = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ConcurrentHashMap<String, Consumer<String>>> pipelinePtyListeners    = new ConcurrentHashMap<>();
 
     public WebSocketHandler(PtyManager ptyManager)
     {
@@ -132,29 +132,20 @@ public class WebSocketHandler implements ReadProcessor<Object>
             // 绑定当前连接到该 PTY
             pipelinePtyMap.put(pipeline.pipelineId(), msg.getPtyId());
 
-            // 移除旧的监听器（如果有）
-            Consumer<String> oldListener = pipelineOutputListeners.remove(pipeline.pipelineId());
-            if (oldListener != null)
-            {
-                // 从之前的 PTY 移除监听器
-                for (PtyInstance p : ptyManager.getAll())
-                {
-                    p.removeOutputListener(oldListener);
-                }
-            }
-
-            // 创建新的输出监听器
-            Consumer<String> listener = output -> {
-                WsMessage outMsg = new WsMessage();
-                outMsg.setType(MessageType.PTY_OUTPUT);
-                outMsg.setPtyId(pty.getId());
-                outMsg.setData(Base64.getEncoder().encodeToString(output.getBytes(StandardCharsets.UTF_8)));
-                sendMessage(pipeline, outMsg);
-            };
-            // 保存监听器引用
-            pipelineOutputListeners.put(pipeline.pipelineId(), listener);
-            // 注册到 PtyInstance
-            pty.addOutputListener(listener);
+            // 每个连接允许同时监听多个 PTY，避免打开新终端后旧终端失去输出
+            String pipelineId = pipeline.pipelineId();
+            ConcurrentHashMap<String, Consumer<String>> listeners = pipelinePtyListeners.computeIfAbsent(pipelineId, k -> new ConcurrentHashMap<>());
+            listeners.computeIfAbsent(pty.getId(), k -> {
+                Consumer<String> listener = output -> {
+                    WsMessage outMsg = new WsMessage();
+                    outMsg.setType(MessageType.PTY_OUTPUT);
+                    outMsg.setPtyId(pty.getId());
+                    outMsg.setData(Base64.getEncoder().encodeToString(output.getBytes(StandardCharsets.UTF_8)));
+                    sendMessage(pipeline, outMsg);
+                };
+                pty.addOutputListener(listener);
+                return listener;
+            });
 
             // 发送历史输出
             String history = pty.getOutputHistory();
@@ -180,15 +171,20 @@ public class WebSocketHandler implements ReadProcessor<Object>
 
     private void handleClose(Pipeline pipeline)
     {
-        String ptyId = pipelinePtyMap.remove(pipeline.pipelineId());
-        Consumer<String> listener = pipelineOutputListeners.remove(pipeline.pipelineId());
-        if (listener != null && ptyId != null)
+        String pipelineId = pipeline.pipelineId();
+        pipelinePtyMap.remove(pipelineId);
+
+        ConcurrentHashMap<String, Consumer<String>> listeners = pipelinePtyListeners.remove(pipelineId);
+        if (listeners != null)
         {
-            PtyInstance pty = ptyManager.get(ptyId);
-            if (pty != null)
+            listeners.forEach((ptyId, listener) ->
             {
-                pty.removeOutputListener(listener);
-            }
+                PtyInstance pty = ptyManager.get(ptyId);
+                if (pty != null)
+                {
+                    pty.removeOutputListener(listener);
+                }
+            });
         }
     }
 

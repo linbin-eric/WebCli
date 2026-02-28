@@ -16,12 +16,12 @@ import java.util.function.BiConsumer;
 @Resource
 public class AgentManager
 {
-    private final Map<String, ServerTcpHandler>           agents                      = new ConcurrentHashMap<>();
-    private final Map<String, List<PtyInfo>>              agentPtyLists               = new ConcurrentHashMap<>();
-    private final Map<String, BiConsumer<String, String>> ptyOutputListeners          = new ConcurrentHashMap<>();
-    private final Map<String, BiConsumer<String, String>> visibilityDisabledCallbacks = new ConcurrentHashMap<>();
-    // 记录每个 Agent 当前被 attach 的 ptyId 列表（不含 agentId 前缀）
-    private final Map<String, List<String>>               agentAttachedPtys           = new ConcurrentHashMap<>();
+    private final Map<String, ServerTcpHandler>                                                   agents                      = new ConcurrentHashMap<>();
+    private final Map<String, List<PtyInfo>>                                                      agentPtyLists               = new ConcurrentHashMap<>();
+    private final Map<String, ConcurrentHashMap<String, BiConsumer<String, String>>>             ptyOutputListeners          = new ConcurrentHashMap<>();
+    private final Map<String, ConcurrentHashMap<String, BiConsumer<String, String>>>             visibilityDisabledCallbacks = new ConcurrentHashMap<>();
+    // 记录每个 Agent 当前被 attach 的 ptyId 及其引用计数（不含 agentId 前缀）
+    private final Map<String, ConcurrentHashMap<String, Integer>>                                agentAttachedPtys           = new ConcurrentHashMap<>();
 
     /**
      * 尝试注册 Agent（同名不覆盖）。
@@ -43,11 +43,12 @@ public class AgentManager
 
     private void reattachPtysForAgent(String agentId, ServerTcpHandler handler)
     {
-        List<String> attachedPtys = agentAttachedPtys.get(agentId);
+        ConcurrentHashMap<String, Integer> attachedPtys = agentAttachedPtys.get(agentId);
         if (attachedPtys != null && !attachedPtys.isEmpty())
         {
-            log.info("Agent {} 重连，重新 attach {} 个终端", agentId, attachedPtys.size());
-            for (String ptyId : attachedPtys)
+            List<String> ptyIds = new ArrayList<>(attachedPtys.keySet());
+            log.info("Agent {} 重连，重新 attach {} 个终端", agentId, ptyIds.size());
+            for (String ptyId : ptyIds)
             {
                 handler.sendPtyAttach(ptyId);
                 log.debug("重新发送 PTY_ATTACH: {}", ptyId);
@@ -106,17 +107,30 @@ public class AgentManager
 
     public void forwardPtyOutput(String agentId, String ptyId, String data)
     {
-        String                     fullPtyId = agentId + ":" + ptyId;
-        BiConsumer<String, String> listener  = ptyOutputListeners.get(fullPtyId);
-        if (listener != null)
+        String fullPtyId = agentId + ":" + ptyId;
+        ConcurrentHashMap<String, BiConsumer<String, String>> listeners = ptyOutputListeners.get(fullPtyId);
+        if (listeners != null)
         {
-            listener.accept(fullPtyId, data);
+            listeners.values().forEach(listener -> listener.accept(fullPtyId, data));
         }
     }
 
-    public void registerPtyOutputListener(String fullPtyId, BiConsumer<String, String> listener)
+    public void registerPtyOutputListener(String fullPtyId, String listenerId, BiConsumer<String, String> listener)
     {
-        ptyOutputListeners.put(fullPtyId, listener);
+        ptyOutputListeners.computeIfAbsent(fullPtyId, k -> new ConcurrentHashMap<>()).put(listenerId, listener);
+    }
+
+    public void unregisterPtyOutputListener(String fullPtyId, String listenerId)
+    {
+        ConcurrentHashMap<String, BiConsumer<String, String>> listeners = ptyOutputListeners.get(fullPtyId);
+        if (listeners != null)
+        {
+            listeners.remove(listenerId);
+            if (listeners.isEmpty())
+            {
+                ptyOutputListeners.remove(fullPtyId, listeners);
+            }
+        }
     }
 
     public void unregisterPtyOutputListener(String fullPtyId)
@@ -127,27 +141,62 @@ public class AgentManager
     /**
      * 记录某个终端被 attach
      */
-    public void recordPtyAttach(String agentId, String ptyId)
+    public synchronized boolean recordPtyAttach(String agentId, String ptyId)
     {
-        agentAttachedPtys.computeIfAbsent(agentId, k -> new ArrayList<>()).add(ptyId);
-        log.debug("记录 PTY attach: agentId={}, ptyId={}", agentId, ptyId);
+        ConcurrentHashMap<String, Integer> ptys = agentAttachedPtys.computeIfAbsent(agentId, k -> new ConcurrentHashMap<>());
+        int nextCount = ptys.merge(ptyId, 1, Integer::sum);
+        log.debug("记录 PTY attach: agentId={}, ptyId={}, count={}", agentId, ptyId, nextCount);
+        return nextCount == 1;
     }
 
     /**
      * 移除某个终端的 attach 记录
      */
-    public void removePtyAttach(String agentId, String ptyId)
+    public synchronized boolean removePtyAttach(String agentId, String ptyId)
     {
-        List<String> ptys = agentAttachedPtys.get(agentId);
+        ConcurrentHashMap<String, Integer> ptys = agentAttachedPtys.get(agentId);
         if (ptys != null)
         {
-            ptys.remove(ptyId);
+            Integer current = ptys.get(ptyId);
+            if (current != null)
+            {
+                if (current <= 1)
+                {
+                    ptys.remove(ptyId);
+                }
+                else
+                {
+                    ptys.put(ptyId, current - 1);
+                }
+            }
             if (ptys.isEmpty())
             {
                 agentAttachedPtys.remove(agentId);
             }
+            boolean detached = !ptys.containsKey(ptyId);
+            log.debug("移除 PTY attach 记录: agentId={}, ptyId={}, detached={}", agentId, ptyId, detached);
+            return detached;
         }
-        log.debug("移除 PTY attach 记录: agentId={}, ptyId={}", agentId, ptyId);
+        log.debug("移除 PTY attach 记录: agentId={}, ptyId={}, detached=true(无记录)", agentId, ptyId);
+        return true;
+    }
+
+    /**
+     * 清空某个终端的 attach 计数（用于强制下线场景）
+     */
+    public synchronized void clearPtyAttach(String agentId, String ptyId)
+    {
+        ConcurrentHashMap<String, Integer> ptys = agentAttachedPtys.get(agentId);
+        if (ptys == null)
+        {
+            return;
+        }
+        ptys.remove(ptyId);
+        if (ptys.isEmpty())
+        {
+            agentAttachedPtys.remove(agentId);
+        }
+        log.debug("清空 PTY attach 记录: agentId={}, ptyId={}", agentId, ptyId);
     }
 
     public void handlePtyVisibilityDisabled(String agentId, String ptyId)
@@ -155,23 +204,37 @@ public class AgentManager
         String fullPtyId = agentId + ":" + ptyId;
         // 移除输出监听器
         ptyOutputListeners.remove(fullPtyId);
+        // 清空 attach 计数，避免后续重连误恢复
+        clearPtyAttach(agentId, ptyId);
         // 通知所有订阅该终端的远端客户端
         notifyVisibilityDisabled(fullPtyId);
     }
 
     public void notifyVisibilityDisabled(String fullPtyId)
     {
-        BiConsumer<String, String> callback = visibilityDisabledCallbacks.get(fullPtyId);
-        if (callback != null)
+        ConcurrentHashMap<String, BiConsumer<String, String>> callbacks = visibilityDisabledCallbacks.remove(fullPtyId);
+        if (callbacks != null)
         {
-            callback.accept(fullPtyId, "VISIBILITY_DISABLED");
-            visibilityDisabledCallbacks.remove(fullPtyId);
+            callbacks.values().forEach(callback -> callback.accept(fullPtyId, "VISIBILITY_DISABLED"));
         }
     }
 
-    public void registerVisibilityDisabledCallback(String fullPtyId, BiConsumer<String, String> callback)
+    public void registerVisibilityDisabledCallback(String fullPtyId, String callbackId, BiConsumer<String, String> callback)
     {
-        visibilityDisabledCallbacks.put(fullPtyId, callback);
+        visibilityDisabledCallbacks.computeIfAbsent(fullPtyId, k -> new ConcurrentHashMap<>()).put(callbackId, callback);
+    }
+
+    public void unregisterVisibilityDisabledCallback(String fullPtyId, String callbackId)
+    {
+        ConcurrentHashMap<String, BiConsumer<String, String>> callbacks = visibilityDisabledCallbacks.get(fullPtyId);
+        if (callbacks != null)
+        {
+            callbacks.remove(callbackId);
+            if (callbacks.isEmpty())
+            {
+                visibilityDisabledCallbacks.remove(fullPtyId, callbacks);
+            }
+        }
     }
 
     public void unregisterVisibilityDisabledCallback(String fullPtyId)
